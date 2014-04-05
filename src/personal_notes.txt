@@ -1,0 +1,12 @@
+okay so the fuse thing is basically a struct of functions that YOU will need to fill in.  check fuse_api.txt for a list of functions.  You can use syscalls, and THERE ARE syscalls for things like mkdir and read and open, etc.  you may need to google to confirm, but USE THOSE SYSCALLS TO ACCESS THE SSD STUFF.  fuse does nothing for you -- THE SYSCALLS DO THE WORK.  then you're gonna need to do the management as well, obvis, but the syscalls will take care of interfacing with the ssd.  (in the fuse example folder) fusexmp.c and fuseexmp_fh.c are good examples to look at.  good luck, future me! :D
+
+the path you get in each callback's args is relative to the root of the mounted fs, so you will need to add the mount dir to the front to get the full path and thus to open it.  literally, fuse has structs for file info that have the flags for read, for example, as well as structs for directories and stuff
+
+you will need (at the least):
+getattr(x), getxattr(x), setxattr(x), mkdir(x), mknod, open, read, write, release, opendir(x), readdir(x), init, destroy, access(x), utimens(x), chmod(x), unlink, rmdir(x)
+
+http://www.cs.nmsu.edu/~pfeiffer/fuse-tutorial/
+is an excellent resource on fuse if you get confused
+
+http://www.cs.utah.edu/dept/old/texinfo/glibc-manual-0.02/library_13.html
+has documentation for a lot of the file system calls that yer gonna use
