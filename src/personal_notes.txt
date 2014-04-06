@@ -3,7 +3,7 @@ okay so the fuse thing is basically a struct of functions that YOU will need to 
 the path you get in each callback's args is relative to the root of the mounted fs, so you will need to add the mount dir to the front to get the full path and thus to open it.  literally, fuse has structs for file info that have the flags for read, for example, as well as structs for directories and stuff
 
 you will need (at the least):
-getattr(x), getxattr(x), setxattr(x), mkdir(x), mknod, open, read, write, release, opendir(x), readdir(x), init, destroy, access(x), utimens(x), chmod(x), unlink, rmdir(x)
+getattr(x), getxattr(x), setxattr(x), mkdir(x), mknod(x), open(x), read(x), write(x), release, opendir(x), readdir(x), init, destroy, access(x), utimens(x), chmod(x), unlink(x), rmdir(x)
 
 http://www.cs.nmsu.edu/~pfeiffer/fuse-tutorial/
 is an excellent resource on fuse if you get confused
