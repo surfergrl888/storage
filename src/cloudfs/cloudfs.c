@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
@@ -19,17 +20,16 @@
 #include "cloudfs.h"
 #include "dedup.h"
 
+#define D_POSIX_C_SOURCE 200809L
 #define UNUSED __attribute__((unused))
 #define SUCCESS 0
 #define META_TIMESTAMPS 1+sizeof(int)+sizeof(off_t)
 #define UTIME_NOW	((1l << 30) - 1l)
 #define UTIME_OMIT	((1l << 30) - 2l)
 #define META_ATIME_OFFSET META_TIMESTAMPS
-#define META_MTIME_OFFSET META_TIMESTAMPS+sizeof(time_t)+sizeof(unsigned long)
-#define META_ATTRTIME_OFFSET META_MTIME_OFFSET+sizeof(time_t)+\
-                             sizeof(unsigned long)
-#define META_REF_COUNT_OFFSET META_ATTRTIME_OFFSET+sizeof(time_t)+\
-                              sizeof(unsigned long)
+#define META_MTIME_OFFSET META_TIMESTAMPS+sizeof(time_t)
+#define META_ATTRTIME_OFFSET META_MTIME_OFFSET+sizeof(time_t)
+#define META_REF_COUNT_OFFSET META_ATTRTIME_OFFSET+sizeof(time_t)
 
 static struct cloudfs_state state_;
 static int infile, outfile;
@@ -263,11 +263,6 @@ int cloudfs_chmod(const char *path, mode_t mode)
     close(meta_file);
     return -errno;
   }
-  if (write(meta_file, &(cur_time.tv_nsec), sizeof(unsigned long)) !=
-      sizeof(unsigned long)) {
-    close(meta_file);
-    return -errno;
-  }
   close(meta_file);
   return SUCCESS;
 }
@@ -338,32 +333,14 @@ int cloudfs_getattr(const char *path, struct stat *statbuf)
       close(metadata_file);
       return -1;
     }
-    if (read(metadata_file, &(statbuf->st_atimensec), sizeof(unsigned long))
-        != sizeof(unsigned long)){
-      printf("Error with metadata!\n");
-      close(metadata_file);
-      return -1;
-    }
     if (read(metadata_file, &(statbuf->st_mtime), sizeof(time_t)) !=
         sizeof(time_t)){
       printf("Error with metadata!\n");
       close(metadata_file);
       return -1;
     }
-    if (read(metadata_file, &(statbuf->st_mtimensec), sizeof(unsigned long))
-        != sizeof(unsigned long)){
-      printf("Error with metadata!\n");
-      close(metadata_file);
-      return -1;
-    }
     if (read(metadata_file, &(statbuf->st_ctime), sizeof(time_t)) !=
         sizeof(time_t)){
-      printf("Error with metadata!\n");
-      close(metadata_file);
-      return -1;
-    }
-    if (read(metadata_file, &(statbuf->st_ctimensec), sizeof(unsigned long))
-        != sizeof(unsigned long)){
       printf("Error with metadata!\n");
       close(metadata_file);
       return -1;
@@ -430,11 +407,6 @@ int cloudfs_setxattr(const char *path, const char *name, const char *value,
     close(meta_file);
     return -errno;
   }
-  if (write(meta_file, &(cur_time.tv_nsec), sizeof(unsigned long)) !=
-      sizeof(unsigned long)) {
-    close(meta_file);
-    return -errno;
-  }
   close(meta_file);
   return SUCCESS;
 }
@@ -443,6 +415,7 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
   int err;
   char data_location;
   struct timespec cur_time;
+  struct timeval time_temp[2];
   char *meta_fullpath;
   struct stat statbuf;
   int metadata_file;
@@ -453,7 +426,11 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
   if (err)
     return -errno;
   if (S_ISDIR(statbuf.st_mode)) {
-    err = utimensat(-1, fullpath, tv, 0);
+    time_temp[0].tv_sec = tv[0].tv_sec;
+    time_temp[1].tv_sec = tv[1].tv_sec;
+    time_temp[0].tv_usec = tv[0].tv_nsec/1000;
+    time_temp[1].tv_usec = tv[1].tv_nsec/1000;
+    err = utimes(fullpath, time_temp);
     free(fullpath);
     if (err)
       return -errno;
@@ -469,7 +446,11 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
     return -1;
   }
   if (data_location == 'S') {
-    err = utimensat(-1, fullpath, tv, 0);
+    time_temp[0].tv_sec = tv[0].tv_sec;
+    time_temp[1].tv_sec = tv[1].tv_sec;
+    time_temp[0].tv_usec = tv[0].tv_nsec/1000;
+    time_temp[1].tv_usec = tv[1].tv_nsec/1000;
+    err = utimes(fullpath, time_temp);
     free(fullpath);
     close(metadata_file);
     if (err)
@@ -505,19 +486,9 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
         close(metadata_file);
         return -errno;
       }
-      if (write(metadata_file, &(cur_time.tv_nsec), sizeof(unsigned long)) ==
-          -1) {
-        close(metadata_file);
-        return -errno;
-      }
     }
     else {
       if (write(metadata_file, &(tv[0].tv_sec), sizeof(time_t)) == -1) {
-        close(metadata_file);
-        return -errno;
-      }
-      if (write(metadata_file, &(tv[0].tv_nsec), sizeof(unsigned long)) ==
-          -1) {
         close(metadata_file);
         return -errno;
       }
@@ -538,19 +509,9 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
         close(metadata_file);
         return -errno;
       }
-      if (write(metadata_file, &(cur_time.tv_nsec), sizeof(unsigned long)) ==
-          -1) {
-        close(metadata_file);
-        return -errno;
-      }
     }
     else {
       if (write(metadata_file, &(tv[1].tv_sec), sizeof(time_t)) == -1) {
-        close(metadata_file);
-        return -errno;
-      }
-      if (write(metadata_file, &(tv[1].tv_nsec), sizeof(unsigned long)) ==
-          -1) {
         close(metadata_file);
         return -errno;
       }
@@ -699,11 +660,6 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
     close(meta_file);
     return -errno;
   }
-  if (write(meta_file, &(cur_time.tv_nsec), sizeof(unsigned long)) !=
-      sizeof(unsigned long)) {
-    close(meta_file);
-    return -errno;
-  }
   close(meta_file);
   return retval;
 }
@@ -759,11 +715,6 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
       close(meta_file);
       return -errno;
     }
-    if (write(meta_file, &(cur_time.tv_nsec), sizeof(unsigned long)) !=
-        sizeof(unsigned long)) {
-      close(meta_file);
-      return -errno;
-    }
   }
   close(meta_file);
   return retval;
@@ -781,6 +732,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   
   // The first thing we do is check the permissions, which are stored with the
   // proxy file
+  fprintf(stderr, "checking permissions...\n");
   char *fullpath = cloudfs_get_fullpath(path);
   if (file_info->flags & O_RDONLY) {
     if (access(fullpath, R_OK)) {
@@ -803,6 +755,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   stat(fullpath, &info);
   free(fullpath);
   
+  fprintf(stderr, "accessing metadata...\n");
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
   meta_file = open(meta_fullpath, O_RDONLY);
   free(meta_fullpath);
@@ -819,7 +772,9 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
     return -errno;
   }
   lseek(meta_file, 1, SEEK_SET);
+  fprintf(stderr, "got initial metadata...\n");
   if (data_location == 'S') {
+    fprintf(stderr, "opening a small file...\n");
     fullpath = cloudfs_get_fullpath(path);
     file_info->fh = open(fullpath, file_info->flags);
     free(fullpath);
@@ -828,6 +783,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
        return -errno;
   }
   else {
+    fprintf(stderr, "opening a big file...\n");
     data_fullpath = cloudfs_get_data_fullpath(path);
     file_info->fh = open(data_fullpath, O_RDWR&O_CREAT, info.st_mode);
     free(data_fullpath);
@@ -835,6 +791,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       return -errno;
     
     if (ref_count == 0) {
+      fprintf(stderr, "lugging data from the cloud...\n");
       infile = file_info->fh;
       sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
       s3_key = get_s3_key(path);
@@ -916,11 +873,8 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     write(meta_file, &ref_count, sizeof(int));
     write(meta_file, &(info.st_size), sizeof(off_t));
     write(meta_file, &(info.st_atime), sizeof(time_t));
-    write(meta_file, &(info.st_atimensec), sizeof(unsigned long));
     write(meta_file, &(info.st_mtime), sizeof(time_t));
-    write(meta_file, &(info.st_mtimensec), sizeof(unsigned long));
     write(meta_file, &(info.st_ctime), sizeof(time_t));
-    write(meta_file, &(info.st_ctimensec), sizeof(unsigned long));
     ftruncate(file_info->fh, 0);
     close(file_info->fh);
   }
@@ -971,8 +925,7 @@ struct fuse_operations cloudfs_operations = {
     .write          = cloudfs_write,
     .release        = cloudfs_release,
     .unlink         = cloudfs_unlink,
-    .destroy        = cloudfs_destroy,
-    .flag_nopath    = 0
+    .destroy        = cloudfs_destroy
 };
 
 int cloudfs_start(struct cloudfs_state *state,

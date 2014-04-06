@@ -66,8 +66,8 @@ endif
 CFLAGS += -Wall  -Wshadow -Wextra -Iinclude \
 					$(FUSE_CFLAGS) \
           -D__STRICT_ANSI__ \
-          -D_ISOC99_SOURCE \
-          -D_POSIX_C_SOURCE=200112L
+          -D_GNU_SOURCE \
+          -D_POSIX_C_SOURCE=200809L
 
 LDFLAGS = $(CURL_LIBS) $(LIBXML2_LIBS) $(FUSE_LIBS) -lpthread -lcrypto -lssl -lcurl
 LIBRARY = ./lib/libs3.a -lcurl -lxml2
