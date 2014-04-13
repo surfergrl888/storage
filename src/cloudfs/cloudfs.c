@@ -701,7 +701,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
     }
   }
   else if (file_info->flags & O_RDWR) {
-    if (access(fullpath, R_OK & W_OK)) {
+    if (access(fullpath, R_OK | W_OK)) {
       free(fullpath);
       return -errno;
     }
