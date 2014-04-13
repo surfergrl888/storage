@@ -17,10 +17,11 @@
 #include <utime.h>
 #include <unistd.h>
 #include "cloudapi.h"
+#include "uthash.h"
 #include "cloudfs.h"
 #include "dedup.h"
 
-#define D_POSIX_C_SOURCE 200809L
+#define DEBUG
 #define UNUSED __attribute__((unused))
 #define SUCCESS 0
 #define META_TIMESTAMPS 1+sizeof(int)+sizeof(off_t)
@@ -30,6 +31,7 @@
 #define META_MTIME_OFFSET META_TIMESTAMPS+sizeof(time_t)
 #define META_ATTRTIME_OFFSET META_MTIME_OFFSET+sizeof(time_t)
 #define META_REF_COUNT_OFFSET META_ATTRTIME_OFFSET+sizeof(time_t)
+
 
 static struct cloudfs_state state_;
 static int infile, outfile;
@@ -76,30 +78,22 @@ char *cloudfs_get_fullpath(const char *path)
   char *fullpath = malloc(strlen(state_.ssd_path)+strlen(path)+1);
   
   strcpy(fullpath, state_.ssd_path);
-  strcat(fullpath, path);
+  strcat(fullpath, path+1);
   
   return fullpath;
 }
 
 char *cloudfs_get_metadata_fullpath(const char *path)
 {
-  char *fullpath = malloc(strlen(state_.ssd_path)+strlen(path)+2);
-  char *cur_pos, *end_pos, *fullpath_pos;
-  int next_jump = 0;
+  struct stat info;
+  char *fullpath = cloudfs_get_fullpath(path);
   
-  strcpy(fullpath, state_.ssd_path);
-  cur_pos = (char *)path;
-  fullpath_pos = fullpath+strlen(fullpath);
-  end_pos = (char *)(path + strlen(path));
-  next_jump = strcspn(cur_pos, "/");
-  while (cur_pos + next_jump != end_pos) {
-    strncpy(fullpath_pos, cur_pos, next_jump+1);
-    cur_pos += next_jump+1;
-    fullpath += next_jump+1;
-    next_jump = strcspn(cur_pos, "/");
-  }
-  strcat(fullpath_pos, ".");
-  strcat(fullpath_pos, cur_pos);
+  stat(fullpath, &info);
+  free(fullpath);
+  fullpath = malloc(strlen(state_.ssd_path)+2+sizeof(ino_t)/2 );
+  
+  sprintf(fullpath, "%s.%x", state_.ssd_path, info.st_ino);
+  
   return fullpath;
 }
 
@@ -230,6 +224,9 @@ int cloudfs_chmod(const char *path, mode_t mode)
   char data_location;
   struct stat info;
   
+  #ifdef DEBUG
+    printf("call to chmod: %s\n", path);
+  #endif
   char *fullpath = cloudfs_get_fullpath(path);
   err = chmod(fullpath, mode);
   if (err) {
@@ -242,17 +239,13 @@ int cloudfs_chmod(const char *path, mode_t mode)
     return SUCCESS;
   }
   fullpath = cloudfs_get_metadata_fullpath(path);
-  meta_file = open(fullpath, O_RDWR);
-  free(fullpath);
-  if (read(meta_file, &data_location, 1) != 1) {
-    printf("Error with metadata!\n");
-    close(meta_file);
-    return -1;
-  }
-  if (data_location == 'S') {
-    close(meta_file);
+  err = stat(fullpath, &info);
+  if (err && (errno == ENOENT)) {
+    free(fullpath);
     return SUCCESS;
   }
+  meta_file = open(fullpath, O_WRONLY);
+  free(fullpath);
   err = lseek(meta_file, META_ATTRTIME_OFFSET, SEEK_SET);
   if (err < 0) {
     close(meta_file);
@@ -294,54 +287,48 @@ int cloudfs_getattr(const char *path, struct stat *statbuf)
 {
   int err;
   int metadata_file;
+  struct stat temp;
   char data_location;
   
   char *fullpath = cloudfs_get_fullpath(path);
   err = stat(fullpath, statbuf);
   free(fullpath);
   
+  #ifdef DEBUG
+    printf("call to getattr: %s\n", path);
+  #endif
   if (err)
     return -errno;
   if (!S_ISDIR(statbuf->st_mode)) {
     fullpath = cloudfs_get_metadata_fullpath(path);
-    metadata_file = open(fullpath, O_RDONLY);
-    free(fullpath);
-    if (read(metadata_file, &data_location, 1) != 1) {
-      printf("Error with metadata!\n");
-      close(metadata_file);
-      return -1;
-    }
-    if (data_location == 'S') {
-      close(metadata_file);
+    err = stat(fullpath, &temp);
+    if (err && (errno == ENOENT)) {
+      free(fullpath);
       return SUCCESS;
     }
-    if (data_location != 'C') {
-      printf("Error with metadata!\n");
-      close(metadata_file);
-      return -1;
-    }
-    lseek(metadata_file, sizeof(int), SEEK_CUR);
+    metadata_file = open(fullpath, O_RDONLY);
+    free(fullpath);
     if (read(metadata_file, &(statbuf->st_size), sizeof(off_t)) != 
         sizeof(off_t)) {
-      printf("Error with metadata!\n");
+      printf("Error with metadata - getting size!\n");
       close(metadata_file);
       return -1;
     }
     if (read(metadata_file, &(statbuf->st_atime), sizeof(time_t)) !=
         sizeof(time_t)){
-      printf("Error with metadata!\n");
+      printf("Error with metadata - getting timestamps!\n");
       close(metadata_file);
       return -1;
     }
     if (read(metadata_file, &(statbuf->st_mtime), sizeof(time_t)) !=
         sizeof(time_t)){
-      printf("Error with metadata!\n");
+      printf("Error with metadata - getting timestamps!\n");
       close(metadata_file);
       return -1;
     }
     if (read(metadata_file, &(statbuf->st_ctime), sizeof(time_t)) !=
         sizeof(time_t)){
-      printf("Error with metadata!\n");
+      printf("Error with metadata - getting timestamps!\n");
       close(metadata_file);
       return -1;
     }
@@ -357,6 +344,9 @@ int cloudfs_getxattr(const char *path, const char *name, char *value,
 {
   int err;
   
+  #ifdef DEBUG
+    printf("call to getxattr: %s\n", path);
+  #endif
   char *fullpath = cloudfs_get_fullpath(path);
   err = lgetxattr(fullpath, name, value, size);
   free(fullpath);
@@ -374,6 +364,9 @@ int cloudfs_setxattr(const char *path, const char *name, const char *value,
   char data_location;
   struct stat info;
   
+  #ifdef DEBUG
+    printf("call to setxattr: %s\n", path);
+  #endif
   char *fullpath = cloudfs_get_fullpath(path);
   err = lsetxattr(fullpath, name, value, size, flags);
   if (err) {
@@ -386,17 +379,13 @@ int cloudfs_setxattr(const char *path, const char *name, const char *value,
     return SUCCESS;
   }
   fullpath = cloudfs_get_metadata_fullpath(path);
-  meta_file = open(fullpath, O_RDWR);
-  free(fullpath);
-  if (read(meta_file, &data_location, 1) != 1) {
-    printf("Error with metadata!\n");
-    close(meta_file);
-    return -1;
-  }
-  if (data_location == 'S') {
-    close(meta_file);
+  err = stat(fullpath, &info);
+  if (err && (errno == ENOENT)) {
+    free(fullpath);
     return SUCCESS;
   }
+  meta_file = open(fullpath, O_RDWR);
+  free(fullpath);
   err = lseek(meta_file, META_ATTRTIME_OFFSET, SEEK_SET);
   if (err < 0) {
     close(meta_file);
@@ -423,6 +412,9 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
   char *fullpath = cloudfs_get_fullpath(path);
   err = stat(fullpath, &statbuf);
   
+  #ifdef DEBUG
+    printf("call to utimens: %s\n", path);
+  #endif
   if (err)
     return -errno;
   if (S_ISDIR(statbuf.st_mode)) {
@@ -437,32 +429,22 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
     return SUCCESS;
   }
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
-  metadata_file = open(meta_fullpath, O_RDWR);
-  free(meta_fullpath);
-  if (read(metadata_file, &data_location, 1) != 1) {
-    printf("Error with metadata!\n");
-    free(fullpath);
-    close(metadata_file);
-    return -1;
-  }
-  if (data_location == 'S') {
+  err = stat(meta_fullpath, &statbuf);
+  if (err && (errno == ENOENT)) {
     time_temp[0].tv_sec = tv[0].tv_sec;
     time_temp[1].tv_sec = tv[1].tv_sec;
     time_temp[0].tv_usec = tv[0].tv_nsec/1000;
     time_temp[1].tv_usec = tv[1].tv_nsec/1000;
     err = utimes(fullpath, time_temp);
     free(fullpath);
-    close(metadata_file);
+    free(meta_fullpath);
     if (err)
       return -errno;
     return SUCCESS;
   }
+  metadata_file = open(meta_fullpath, O_RDWR);
+  free(meta_fullpath);
   free(fullpath);
-  if (data_location != 'C') {
-    printf("Error with metadata!\n");
-    close(metadata_file);
-    return -1;
-  }
   err = lseek(metadata_file, META_TIMESTAMPS, SEEK_SET);
   if (err < 0) {
     close(metadata_file);
@@ -527,73 +509,42 @@ int cloudfs_mknod(const char *path, mode_t mode, dev_t dev) {
   int err, meta_file, null = 0;
   
   char *fullpath = cloudfs_get_fullpath(path);
-  char *meta_fullpath = cloudfs_get_metadata_fullpath(path);
   
+  #ifdef DEBUG
+    printf("call to mknod: %s\n", path);
+  #endif
   err = mknod(fullpath, mode, dev);
-  if (err) {
-    free(fullpath);
-    free(meta_fullpath);
-    return -errno;
-  }
   
-  // We need unmitigated r/w access to the metadata file.
-  err = mknod(meta_fullpath, S_IRUSR|S_IWUSR, dev);
   if (err) {
-    unlink(fullpath);
+    #ifdef DEBUG
+      printf("Error making file: %d\n", err);
+    #endif
     free(fullpath);
-    free(meta_fullpath);
     return -errno;
   }
-  meta_file = open(meta_fullpath, O_WRONLY);
-  if (meta_file == NULL) {
-    unlink(meta_fullpath);
-    unlink(fullpath);
-    free(fullpath);
-    free(meta_fullpath);
-    return -errno;
-  }
-  if (write(meta_file, "S", 1) != 1) {
-    close(meta_file);
-    unlink(meta_fullpath);
-    unlink(fullpath);
-    free(fullpath);
-    free(meta_fullpath);
-    return -errno;
-  }
-  if (write(meta_file, &(null), sizeof(int)) != 1) {
-    close(meta_file);
-    unlink(meta_fullpath);
-    unlink(fullpath);
-    free(fullpath);
-    free(meta_fullpath);
-    return -errno;
-  }
-  close(meta_file);
   free(fullpath);
-  free(meta_fullpath);
   return SUCCESS;
 }
 
 int cloudfs_unlink(const char *path) {
   char *fullpath, *meta_fullpath, *data_fullpath;
+  struct stat temp;
   char *s3_key;
   int meta_file, err;
   char s3_bucket[11];
   char data_location;
   
+  #ifdef DEBUG
+    printf("call to unlink: %s\n", path);
+  #endif
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
-  meta_file = open(meta_fullpath, O_WRONLY);
-  if (meta_file == NULL) {
-    free(meta_fullpath);
-    return -errno;
-  }
-  err = read(meta_file, &data_location, 0);
-  if (err != 1) {
-    close(meta_file);
-    free(meta_fullpath);
-    return -errno;
-  }
-  if (data_location == 'C') {
+  err = stat(meta_fullpath, &temp);
+  if (!(err && (errno == ENOENT))) {
+    meta_file = open(meta_fullpath, O_WRONLY);
+    if (meta_file == NULL) {
+      free(meta_fullpath);
+      return -errno;
+    }
     close(meta_file);
     s3_key = get_s3_key(path);
     sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
@@ -602,15 +553,14 @@ int cloudfs_unlink(const char *path) {
     unlink(data_fullpath);
     free(s3_key);
     free(data_fullpath);
+    unlink(meta_fullpath);
   }
   
   
   fullpath = cloudfs_get_fullpath(path);
   unlink(fullpath);
-  free(fullpath);
-  
-  unlink(meta_fullpath);
   free(meta_fullpath);
+  free(fullpath);
   
   return SUCCESS;
 }
@@ -624,8 +574,12 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
   char *meta_fullpath;
   size_t retval;
   struct timespec cur_time;
+  struct stat temp;
   char data_location;
   
+  #ifdef DEBUG
+    printf("call to read: %s\n", path);
+  #endif
   err = lseek(file_info->fh, offset, SEEK_SET);
   if (err < 0) {
     return -errno;
@@ -637,19 +591,15 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
   }
   
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
+  err = stat(meta_fullpath, &temp);
+  if (err && (errno == ENOENT)) {
+    free(meta_fullpath);
+    return retval;
+  }
   meta_file = open(meta_fullpath, O_WRONLY);
   free(meta_fullpath);
   if (meta_file == NULL)
     return -errno;
-  err = read(meta_file, &data_location, 0);
-  if (err != 1) {
-    close(meta_file);
-    return -errno;
-  }
-  if (data_location == 'S') {
-    close(meta_file);
-    return retval;
-  }
   err = lseek(meta_file, META_ATIME_OFFSET, SEEK_SET);
   if (err < 0) {
     close(meta_file);
@@ -674,6 +624,9 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
   size_t retval;
   struct timespec cur_time;
   
+  #ifdef DEBUG
+    printf("call to write: %s\n", path);
+  #endif
   err = lseek(file_info->fh, offset, SEEK_SET);
   if (err < 0) {
     return -errno;
@@ -685,19 +638,15 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
   }
   
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
+  err = stat(meta_fullpath, &info);
+  if (err && (errno == ENOENT)) {
+    free(meta_fullpath);
+    return retval;
+  }
   meta_file = open(meta_fullpath, O_RDWR);
   free(meta_fullpath);
   if (meta_file == NULL)
     return -errno;
-  err = read(meta_file, &data_location, 0);
-  if (err != 1) {
-    close(meta_file);
-    return -errno;
-  }
-  if (data_location == 'S') {
-    close(meta_file);
-    return retval;
-  }
   err = fstat(file_info->fh, &info);
   if (err) {
     close(meta_file);
@@ -728,8 +677,11 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   char data_location;
   char s3_bucket[11];
   int meta_file;
-  int err, ref_count;
+  int err, already_in_ssd;
   
+  #ifdef DEBUG
+    printf("call to open: %s\n", path);
+  #endif
   // The first thing we do is check the permissions, which are stored with the
   // proxy file
   fprintf(stderr, "checking permissions...\n");
@@ -752,45 +704,33 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       return -errno;
     }
   }
-  stat(fullpath, &info);
   free(fullpath);
   
   fprintf(stderr, "accessing metadata...\n");
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
-  meta_file = open(meta_fullpath, O_RDONLY);
-  free(meta_fullpath);
-  if (meta_file == NULL)
-    return -errno;
-  err = read(meta_file, &data_location, 1);
-  if (err != 1) {
-    close(meta_file);
-    return -errno;
-  }
-  err = read(meta_file, &ref_count, sizeof(int));
-  if (err != sizeof(int)) {
-    close(meta_file);
-    return -errno;
-  }
-  lseek(meta_file, 1, SEEK_SET);
-  fprintf(stderr, "got initial metadata...\n");
-  if (data_location == 'S') {
+  err = stat(meta_fullpath, &temp);
+  if (err && (errno == ENOENT)) {
     fprintf(stderr, "opening a small file...\n");
     fullpath = cloudfs_get_fullpath(path);
     file_info->fh = open(fullpath, file_info->flags);
     free(fullpath);
+    free(meta_fullpath);
     
     if (file_info->fh == NULL)
        return -errno;
   }
   else {
     fprintf(stderr, "opening a big file...\n");
+    free(meta_fullpath);
     data_fullpath = cloudfs_get_data_fullpath(path);
-    file_info->fh = open(data_fullpath, O_RDWR&O_CREAT, info.st_mode);
+    err = stat(data_fullpath, &info);
+    already_in_ssd = !(err && (errno == ENOENT));
+    file_info->fh = open(data_fullpath, O_RDWR&O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
     free(data_fullpath);
     if (file_info->fh == NULL)
       return -errno;
     
-    if (ref_count == 0) {
+    if (!already_in_ssd) {
       fprintf(stderr, "lugging data from the cloud...\n");
       infile = file_info->fh;
       sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
@@ -802,57 +742,34 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
         cloudfs_error("error with the cloud\n");
         return -1;
       }
+      free(s3_key);
     }
   }
-  ref_count ++;
-  err = write(meta_file, &ref_count, sizeof(int));
-  if (err != sizeof(int)) {
-    if (data_location == 'C')
-      cloud_delete_object(s3_bucket, s3_key);
-    free(s3_key);
-    close(file_info->fh);
-    close(meta_file);
-    return -errno;
-  }
-  close(meta_file);
-  free(s3_key);
+  // update ref count here
   return SUCCESS;
 }
 
 int cloudfs_release(const char *path, struct fuse_file_info *file_info)
 {
   char *meta_fullpath, *data_fullpath, *s3_key;
-  struct stat info;
+  struct stat info, temp;
   S3Status status;
-  char data_location;
   char s3_bucket[11];
   int meta_file;
-  int err, ref_count;
+  int err, ref_countm in_ssd;
   
+  #ifdef DEBUG
+    printf("call to release: %s\n", path);
+  #endif
   fstat(file_info->fh, &info);
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
-  meta_file = open(meta_fullpath, O_RDONLY);
-  free(meta_fullpath);
-  if (meta_file == NULL)
-    return -errno;
-  err = read(meta_file, &data_location, 1);
-  if (err != 1) {
-    close(meta_file);
-    return -errno;
-  }
-  err = read(meta_file, &ref_count, sizeof(int));
-  if (err != sizeof(int)) {
-    close(meta_file);
-    return -errno;
-  }
-  ref_count--;
-  if ((ref_count > 0) || ((data_location == 'S') &&
+  err = stat(meta_fullpath, &temp)
+  in_ssd = (err && (errno == ENOENT));
+  // get ref count here
+  if ((ref_count > 1) || (in_ssd &&
                           (info.st_size <= state_.threshold))) {
-    lseek(meta_file, 1, SEEK_SET);
-    if (write(meta_file, &ref_count, sizeof(int)) != sizeof(int)) {
-      close(meta_file);
-      return -errno;
-    }
+    // update ref count here
+    free(meta_fullpath);
     close(file_info->fh);
     return SUCCESS;
   }
@@ -867,25 +784,56 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     cloudfs_error("error with the cloud\n");
     return -1;
   }
-  if (data_location == 'S') {
-    lseek(meta_file, 0, SEEK_SET);
-    write(meta_file, "C", 1);
-    write(meta_file, &ref_count, sizeof(int));
-    write(meta_file, &(info.st_size), sizeof(off_t));
-    write(meta_file, &(info.st_atime), sizeof(time_t));
-    write(meta_file, &(info.st_mtime), sizeof(time_t));
-    write(meta_file, &(info.st_ctime), sizeof(time_t));
-    ftruncate(file_info->fh, 0);
+  if (in_ssd) {
+    meta_file = open(meta_fullpath, O_WRONLY&O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+    if (meta_file == NULL) {
+      return -errno;
+    }
+    if (write(meta_file, &(info.st_size), sizeof(off_t)) != sizeof(off_t)) {
+      close(meta_file);
+      unlink(meta_fullpath);
+      free(meta_fullpath);
+      return -errno;
+    }
+    if (write(meta_file, &(info.st_atime), sizeof(time_t)) != sizeof(time_t)) {
+      close(meta_file);
+      unlink(meta_fullpath);
+      free(meta_fullpath);
+      return -errno;
+    }
+    if (write(meta_file, &(info.st_mtime), sizeof(time_t)) != sizeof(time_t)) {
+      close(meta_file);
+      unlink(meta_fullpath);
+      free(meta_fullpath);
+      return -errno;
+    }
+    if (write(meta_file, &(info.st_ctime), sizeof(time_t)) != sizeof(time_t)) {
+      close(meta_file);
+      unlink(meta_fullpath);
+      free(meta_fullpath);
+      return -errno;
+    }
+    close(meta_file);
+    if (ftruncate(file_info->fh, 0)) {
+      unlink(meta_fullpath);
+      free(meta_fullpath);
+      return -errno;
+    }
     close(file_info->fh);
+    free(meta_fullpath);
   }
-  if (data_location == 'C') {
-    lseek(meta_file, 1, SEEK_SET);
-    write(meta_file, &ref_count, sizeof(int));
+  else {
+    meta_file = open(meta_fullpath, O_WRONLY);
+    free(meta_fullpath);
+    if (meta_file == NULL) {
+      return -errno;
+    }
     close(file_info->fh);
     data_fullpath = cloudfs_get_data_fullpath(path);
     unlink(data_fullpath);
     free(data_fullpath);
   }
+  // update ref count here - remove from hash
   close(meta_file);
   free(s3_key);
   return SUCCESS;
@@ -938,7 +886,7 @@ int cloudfs_start(struct cloudfs_state *state,
   argv[argc] = (char *) malloc(1024 * sizeof(char));
   strcpy(argv[argc++], state->fuse_path);
   argv[argc++] = "-s"; // set the fuse mode to single thread
-  //argv[argc++] = "-f"; // run fuse in foreground 
+  argv[argc++] = "-f"; // run fuse in foreground 
 
   state_  = *state;
 
