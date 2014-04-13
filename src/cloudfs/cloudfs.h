@@ -1,6 +1,8 @@
 #ifndef __CLOUDFS_H_
 #define __CLOUDFS_H_
 
+#include "uthash.h"
+
 #define MAX_PATH_LEN 4096
 #define MAX_HOSTNAME_LEN 1024
 

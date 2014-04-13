@@ -93,7 +93,7 @@ char *cloudfs_get_metadata_fullpath(const char *path)
   free(fullpath);
   fullpath = malloc(strlen(state_.ssd_path)+2+sizeof(ino_t)/2 );
   
-  sprintf(fullpath, "%s.%x", state_.ssd_path, info.st_ino);
+  sprintf(fullpath, "%s.%lx", state_.ssd_path, (unsigned long int)info.st_ino);
   
   return fullpath;
 }
@@ -222,7 +222,6 @@ int cloudfs_chmod(const char *path, mode_t mode)
 {
   struct timespec cur_time;
   int err, meta_file;
-  char data_location;
   struct stat info;
   
   #ifdef DEBUG
@@ -289,7 +288,6 @@ int cloudfs_getattr(const char *path, struct stat *statbuf)
   int err;
   int metadata_file;
   struct stat temp;
-  char data_location;
   
   char *fullpath = cloudfs_get_fullpath(path);
   err = stat(fullpath, statbuf);
@@ -362,7 +360,6 @@ int cloudfs_setxattr(const char *path, const char *name, const char *value,
 {
   struct timespec cur_time;
   int err, meta_file;
-  char data_location;
   struct stat info;
   
   #ifdef DEBUG
@@ -403,7 +400,6 @@ int cloudfs_setxattr(const char *path, const char *name, const char *value,
 
 int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
   int err;
-  char data_location;
   struct timespec cur_time;
   struct timeval time_temp[2];
   char *meta_fullpath;
@@ -507,7 +503,7 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
 /* File creation/deletion */
 
 int cloudfs_mknod(const char *path, mode_t mode, dev_t dev) {
-  int err, meta_file, null = 0;
+  int err;
   
   char *fullpath = cloudfs_get_fullpath(path);
   
@@ -533,7 +529,6 @@ int cloudfs_unlink(const char *path) {
   char *s3_key;
   int meta_file, err;
   char s3_bucket[11];
-  char data_location;
   
   #ifdef DEBUG
     printf("call to unlink: %s\n", path);
@@ -576,7 +571,6 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
   size_t retval;
   struct timespec cur_time;
   struct stat temp;
-  char data_location;
   
   #ifdef DEBUG
     printf("call to read: %s\n", path);
@@ -620,7 +614,6 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
 {
   int err, meta_file, i;
   char *meta_fullpath;
-  char data_location;
   struct stat info;
   size_t retval;
   struct timespec cur_time;
@@ -673,12 +666,10 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
 int cloudfs_open(const char *path, struct fuse_file_info *file_info)
 {
   char *meta_fullpath, *data_fullpath, *s3_key = NULL;
-  struct reference_struct reference_count;
+  struct reference_struct *reference_count;
   struct stat info, temp;
   S3Status status;
-  char data_location;
   char s3_bucket[11];
-  int meta_file;
   int err, already_in_ssd;
   
   #ifdef DEBUG
@@ -686,7 +677,6 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   #endif
   // The first thing we do is check the permissions, which are stored with the
   // proxy file
-  fprintf(stderr, "checking permissions...\n");
   char *fullpath = cloudfs_get_fullpath(path);
   if (file_info->flags & O_RDONLY) {
     if (access(fullpath, R_OK)) {
@@ -708,11 +698,9 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   }
   free(fullpath);
   
-  fprintf(stderr, "accessing metadata...\n");
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
   err = stat(meta_fullpath, &temp);
   if (err && (errno == ENOENT)) {
-    fprintf(stderr, "opening a small file...\n");
     fullpath = cloudfs_get_fullpath(path);
     file_info->fh = open(fullpath, file_info->flags);
     free(fullpath);
@@ -722,7 +710,6 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
        return -errno;
   }
   else {
-    fprintf(stderr, "opening a big file...\n");
     free(meta_fullpath);
     data_fullpath = cloudfs_get_data_fullpath(path);
     err = stat(data_fullpath, &info);
@@ -733,7 +720,6 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       return -errno;
     
     if (!already_in_ssd) {
-      fprintf(stderr, "lugging data from the cloud...\n");
       infile = file_info->fh;
       sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
       s3_key = get_s3_key(path);
@@ -748,7 +734,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
     }
   }
   fstat(file_info->fh, &info);
-  HASH_FIND(hh, reference_counts, info.st_ino, sizeof(ino_t), reference_count);
+  HASH_FIND(hh, reference_counts,&(info.st_ino),sizeof(ino_t),reference_count);
   if (reference_count == NULL) {
     reference_count = malloc(sizeof(struct reference_struct));
     reference_count->ref_count = 1;
@@ -769,19 +755,19 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
   S3Status status;
   char s3_bucket[11];
   int meta_file;
-  int err, ref_countm in_ssd;
+  int err, in_ssd;
   
   #ifdef DEBUG
     printf("call to release: %s\n", path);
   #endif
   fstat(file_info->fh, &info);
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
-  err = stat(meta_fullpath, &temp)
+  err = stat(meta_fullpath, &temp);
   in_ssd = (err && (errno == ENOENT));
-  // get ref count here
-  if ((ref_count > 1) || (in_ssd &&
+  HASH_FIND(hh, reference_counts,&(info.st_ino),sizeof(ino_t),reference_count);
+  if ((reference_count->ref_count > 1) || (in_ssd &&
                           (info.st_size <= state_.threshold))) {
-    // update ref count here
+    reference_count->ref_count--;
     free(meta_fullpath);
     close(file_info->fh);
     return SUCCESS;
@@ -792,7 +778,6 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
   outfile = file_info->fh;
   status = cloud_put_object(s3_bucket, s3_key, info.st_size, put_buffer);
   if (status != S3StatusOK) {
-    close(meta_file);
     free(s3_key);
     cloudfs_error("error with the cloud\n");
     return -1;
@@ -836,20 +821,14 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     free(meta_fullpath);
   }
   else {
-    meta_file = open(meta_fullpath, O_WRONLY);
     free(meta_fullpath);
-    if (meta_file == NULL) {
-      return -errno;
-    }
     close(file_info->fh);
     data_fullpath = cloudfs_get_data_fullpath(path);
     unlink(data_fullpath);
     free(data_fullpath);
   }
-  HASH_FIND(hh, reference_counts, info.st_ino, sizeof(ino_t), reference_count);
   HASH_DEL(reference_counts, reference_count);
   free(reference_count);
-  close(meta_file);
   free(s3_key);
   return SUCCESS;
 }
