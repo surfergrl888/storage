@@ -18,6 +18,12 @@ struct cloudfs_state {
   char no_compress;
 };
 
+struct reference_struct {
+  ino_t inode;
+  int ref_count;
+  UT_hash_handle hh;
+};
+
 int cloudfs_start(struct cloudfs_state* state,
                   const char* fuse_runtime_name);  
 char *cloudfs_get_fullpath(const char *path);

@@ -32,6 +32,7 @@
 #define META_ATTRTIME_OFFSET META_MTIME_OFFSET+sizeof(time_t)
 #define META_REF_COUNT_OFFSET META_ATTRTIME_OFFSET+sizeof(time_t)
 
+struct reference_struct *reference_counts = NULL;
 
 static struct cloudfs_state state_;
 static int infile, outfile;
@@ -672,7 +673,8 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
 int cloudfs_open(const char *path, struct fuse_file_info *file_info)
 {
   char *meta_fullpath, *data_fullpath, *s3_key = NULL;
-  struct stat info;
+  struct reference_struct reference_count;
+  struct stat info, temp;
   S3Status status;
   char data_location;
   char s3_bucket[11];
@@ -725,7 +727,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
     data_fullpath = cloudfs_get_data_fullpath(path);
     err = stat(data_fullpath, &info);
     already_in_ssd = !(err && (errno == ENOENT));
-    file_info->fh = open(data_fullpath, O_RDWR&O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+    file_info->fh = open(data_fullpath, O_RDWR|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
     free(data_fullpath);
     if (file_info->fh == NULL)
       return -errno;
@@ -745,13 +747,24 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       free(s3_key);
     }
   }
-  // update ref count here
+  fstat(file_info->fh, &info);
+  HASH_FIND(hh, reference_counts, info.st_ino, sizeof(ino_t), reference_count);
+  if (reference_count == NULL) {
+    reference_count = malloc(sizeof(struct reference_struct));
+    reference_count->ref_count = 1;
+    reference_count->inode = info.st_ino;
+    HASH_ADD(hh, reference_counts, inode, sizeof(ino_t), reference_count);
+  }
+  else {
+    reference_count->ref_count++;
+  }
   return SUCCESS;
 }
 
 int cloudfs_release(const char *path, struct fuse_file_info *file_info)
 {
   char *meta_fullpath, *data_fullpath, *s3_key;
+  struct reference_struct *reference_count;
   struct stat info, temp;
   S3Status status;
   char s3_bucket[11];
@@ -785,7 +798,7 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     return -1;
   }
   if (in_ssd) {
-    meta_file = open(meta_fullpath, O_WRONLY&O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+    meta_file = open(meta_fullpath, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
     if (meta_file == NULL) {
       return -errno;
     }
@@ -833,7 +846,9 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     unlink(data_fullpath);
     free(data_fullpath);
   }
-  // update ref count here - remove from hash
+  HASH_FIND(hh, reference_counts, info.st_ino, sizeof(ino_t), reference_count);
+  HASH_DEL(reference_counts, reference_count);
+  free(reference_count);
   close(meta_file);
   free(s3_key);
   return SUCCESS;
@@ -845,18 +860,6 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
 static 
 struct fuse_operations cloudfs_operations = {
     .init           = cloudfs_init,
-    //
-    // TODO
-    //
-    // This is where you add the VFS functions that your implementation of
-    // MelangsFS will support, i.e. replace 'NULL' with 'melange_operation'
-    // --- melange_getattr() and melange_init() show you what to do ...
-    //
-    // Different operations take different types of parameters. This list can
-    // be found at the following URL:
-    // --- http://fuse.sourceforge.net/doxygen/structfuse__operations.html
-    //
-    
     .getattr        = cloudfs_getattr,
     .getxattr       = cloudfs_getxattr,
     .setxattr       = cloudfs_setxattr,
