@@ -1,0 +1,9 @@
+// run format_disks.sh before you run tests
+
+1.write a function to check and see if a bucket exists
+2.migrate the cloud code into a separate file, and write versions for both files and segments
+	a. you will need to create a hash table for segments, and thus, a struct, which should contain:
+		1. the hash on the (uncompressed) contents
+		2. the size of the segment
+		3. the number of references to each segment
+3. compress after segmenting

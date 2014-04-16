@@ -43,7 +43,7 @@ function execute_part1_tests()
 
         echo "Executing part1 tests"
 	rm -rf $CACHEDIR 
-	reinit_env
+	#reinit_env
 
 	# create the test data in FUSE dir
 	untar $TARFILE $TESTDIR 
@@ -51,7 +51,7 @@ function execute_part1_tests()
 	untar $TARFILE $TEMPDIR
 
 	# get rid of disk cache
-	./cloudfs_controller.sh x
+	#./cloudfs_controller.sh x
 
 	#----
 	# Testcases
@@ -130,7 +130,7 @@ mkdir -p $LOGDIR
 #----
 # tests
 kill -9 `ps -lef|grep s3server.pyc|grep -v grep|awk '{print $4}'` > /dev/null 2>&1
-./cloudfs_controller.sh u > /dev/null 2>&1
+#./cloudfs_controller.sh u > /dev/null 2>&1
 rm -rf $SSD/*
 rm -rf $FUSE/*
 rm -rf $CLOUD/*
@@ -144,7 +144,7 @@ fi
 echo "Waiting for s3 server to initilaize(sleep 5)..."
 sleep 5
 
-./cloudfs_controller.sh m
+#./cloudfs_controller.sh m
 if [ $? -ne 0 ]; then
   echo "Unable to start cloudfs"
   exit 1

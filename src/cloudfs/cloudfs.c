@@ -24,7 +24,7 @@
 #define DEBUG
 #define UNUSED __attribute__((unused))
 #define SUCCESS 0
-#define META_TIMESTAMPS 1+sizeof(int)+sizeof(off_t)
+#define META_TIMESTAMPS sizeof(off_t)
 #define UTIME_NOW	((1l << 30) - 1l)
 #define UTIME_OMIT	((1l << 30) - 2l)
 #define META_ATIME_OFFSET META_TIMESTAMPS
@@ -36,6 +36,8 @@ struct reference_struct *reference_counts = NULL;
 
 static struct cloudfs_state state_;
 static int infile, outfile;
+int bucketExists;
+char *bucketToCheck;
 
 int get_buffer(const char *buffer, int bufferLength) {
   return write(outfile, buffer, bufferLength);  
@@ -44,6 +46,19 @@ int get_buffer(const char *buffer, int bufferLength) {
 int put_buffer(char *buffer, int bufferLength) {
   //fprintf(stdout, "put_buffer %d \n", bufferLength);
   return read(infile, buffer, bufferLength);
+}
+
+int check_bucket(const char *bucketName) {
+  if (strcmp(bucketName, bucketToCheck) == 0)
+    bucketExists = 1;
+  return 0; 
+}
+
+int bucket_exists(char *bucket) {
+  bucketExists = 0;
+  bucketToCheck = bucket;
+  cloud_list_service(check_bucket);
+  return bucketExists;
 }
 
 int get_weak_hash(const char *path)
@@ -150,8 +165,9 @@ int cloudfs_mkdir(const char *path, mode_t mode)
   err =  mkdir(fullpath, mode);
   free(fullpath);
   
-  if (err)
+  if (err) {
     return -errno;
+  }
   return SUCCESS;
 }
 
@@ -448,7 +464,7 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
     return -errno;
   }
   if (tv[0].tv_nsec == UTIME_OMIT) {
-    err = lseek(metadata_file, sizeof(time_t)+sizeof(unsigned long), SEEK_CUR);
+    err = lseek(metadata_file, sizeof(time_t), SEEK_CUR);
     if (err < 0) {
       close(metadata_file);
       return -errno;
@@ -536,17 +552,14 @@ int cloudfs_unlink(const char *path) {
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
   err = stat(meta_fullpath, &temp);
   if (!(err && (errno == ENOENT))) {
-    meta_file = open(meta_fullpath, O_WRONLY);
-    if (meta_file == NULL) {
-      free(meta_fullpath);
-      return -errno;
-    }
-    close(meta_file);
     s3_key = get_s3_key(path);
-    sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
+    sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path)+100);
     cloud_delete_object(s3_bucket, s3_key);
     data_fullpath = cloudfs_get_data_fullpath(path);
-    unlink(data_fullpath);
+    err = stat(data_fullpath, &temp);
+    if (!(err && (errno == ENOENT))) {
+      unlink(data_fullpath);
+    }
     free(s3_key);
     free(data_fullpath);
     unlink(meta_fullpath);
@@ -720,14 +733,16 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       return -errno;
     
     if (!already_in_ssd) {
-      infile = file_info->fh;
-      sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
+      outfile = file_info->fh;
+      sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path)+100);
       s3_key = get_s3_key(path);
       status = cloud_get_object(s3_bucket, s3_key, get_buffer);
       if (status != S3StatusOK) {
+        #ifdef DEBUG
+          cloud_print_error();
+        #endif
         close(file_info->fh);
         free(s3_key);
-        cloudfs_error("error with the cloud\n");
         return -1;
       }
       free(s3_key);
@@ -773,15 +788,30 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     return SUCCESS;
   }
   lseek(file_info->fh, 0, SEEK_SET);
-  sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path));
+  sprintf(s3_bucket,"%d",strlen(path)+get_weak_hash(path)+100);
   s3_key = get_s3_key(path);
-  outfile = file_info->fh;
+  infile = file_info->fh;
+  if (in_ssd) {
+    data_fullpath = cloudfs_get_fullpath(path);
+    if (!bucket_exists(s3_bucket)) {
+      cloud_create_bucket(s3_bucket);
+    }
+  }
+  else {
+    data_fullpath = cloudfs_get_data_fullpath(path);
+  }
+  infile = open(data_fullpath, O_RDONLY);
+  free(data_fullpath);
   status = cloud_put_object(s3_bucket, s3_key, info.st_size, put_buffer);
   if (status != S3StatusOK) {
+    #ifdef DEBUG
+      cloud_print_error();
+    #endif
     free(s3_key);
-    cloudfs_error("error with the cloud\n");
+    close(infile);
     return -1;
   }
+  close(infile);
   if (in_ssd) {
     meta_file = open(meta_fullpath, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
     if (meta_file == NULL) {
@@ -812,13 +842,16 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
       return -errno;
     }
     close(meta_file);
-    if (ftruncate(file_info->fh, 0)) {
+    data_fullpath = cloudfs_get_fullpath(path);
+    if (truncate(data_fullpath, 0)) {
+      free(data_fullpath);
       unlink(meta_fullpath);
       free(meta_fullpath);
       return -errno;
     }
-    close(file_info->fh);
+    free(data_fullpath);
     free(meta_fullpath);
+    close(file_info->fh);
   }
   else {
     free(meta_fullpath);
@@ -868,7 +901,9 @@ int cloudfs_start(struct cloudfs_state *state,
   argv[argc] = (char *) malloc(1024 * sizeof(char));
   strcpy(argv[argc++], state->fuse_path);
   argv[argc++] = "-s"; // set the fuse mode to single thread
-  argv[argc++] = "-f"; // run fuse in foreground 
+  #ifdef DEBUG
+    argv[argc++] = "-f"; // run fuse in foreground 
+  #endif
 
   state_  = *state;
 
