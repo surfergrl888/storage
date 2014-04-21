@@ -238,7 +238,7 @@ void rabin_reset(rabinpoly_t *rp) {
 	rp->fingerprint = 0; 
 	rp->bufpos = -1;
 	rp->cur_seg_size = 0;
-	bzero ((char*) rp->buf, rp->window_size*sizeof (u_char));
+	memset ((char*) rp->buf, 0, rp->window_size*sizeof (u_char));
 }
 
 void rabin_free(rabinpoly_t **p_rp)

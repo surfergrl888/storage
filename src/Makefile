@@ -57,13 +57,13 @@ ifndef CFLAGS
     ifdef DEBUG
         CFLAGS := -g
     else
-        CFLAGS := -O3
+        CFLAGS := -O0
     endif
 endif
 
 #          $(CURL_CFLAGS) $(LIBXML2_CFLAGS) 
 	
-CFLAGS += -Wall  -Wshadow -Wextra -Iinclude \
+CFLAGS += -Wall  -Wshadow -Wextra -std=c99 -g -Iinclude \
 					$(FUSE_CFLAGS) \
           -D__STRICT_ANSI__ \
           -D_GNU_SOURCE \
@@ -128,7 +128,8 @@ cloudfs: $(BUILD)/bin/cloudfs
 CLOUDFS_OBJS = $(BUILD)/obj/cloudfs.o \
 			   $(BUILD)/obj/compressapi.o \
 			   $(BUILD)/obj/cloudapi.o \
-			   $(BUILD)/obj/main.o
+			   $(BUILD)/obj/main.o \
+			   $(BUILD)/obj/cloudfs_dedup.o
 #You can append other objects
 
 $(BUILD)/bin/cloudfs: $(CLOUDFS_OBJS)
