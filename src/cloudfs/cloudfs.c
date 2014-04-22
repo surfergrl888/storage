@@ -24,7 +24,7 @@
 
 #define UNUSED __attribute__((unused))
 #define SUCCESS 0
-#define LOGFILE "/tmp/cloudfs.log"
+#define LOGFILE "./cloudfs.log"
 #define META_TIMESTAMPS sizeof(off_t)
 #define UTIME_NOW	((1l << 30) - 1l)
 #define UTIME_OMIT	((1l << 30) - 2l)
@@ -1136,9 +1136,9 @@ int cloudfs_start(struct cloudfs_state *state,
   argv[argc] = (char *) malloc(1024 * sizeof(char));
   strcpy(argv[argc++], state->fuse_path);
   argv[argc++] = "-s"; // set the fuse mode to single thread
-  #ifdef DEBUG
-    argv[argc++] = "-f"; // run fuse in foreground 
-  #endif
+  //#ifdef DEBUG
+    //argv[argc++] = "-f"; // run fuse in foreground 
+  //#endif
 
   state_  = *state;
 

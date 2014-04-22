@@ -134,6 +134,7 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
 	char buf[1024];
 	MD5_CTX ctx;
 	int bytes, err, i;
+	int total_segment_len = 0;
   
   #ifdef DEBUG
     printf("calling dedup_migrate_file\n");
@@ -236,8 +237,38 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
         #endif
         current_segment = NULL;
         HASH_FIND_STR(segment_hash_table, current_hash_string, current_segment);
-        if (current_segment != NULL)
+        total_segment_len += segment_len;
+        
+        if( total_segment_len >= 0x4200) {
+          int mk=0;
+          mk=lseek(segmenting_fd, 0, SEEK_CUR);
+          mk = mk;
+          mk++;
+        }
+        if (current_segment != NULL) {
           current_segment->ref_count ++;
+          if (!state_.no_compress) {
+            err = fseek(segmenting_file, segment_len, SEEK_CUR);
+          }
+          else {
+            err = lseek(segmenting_fd, segment_len, SEEK_CUR);
+          }
+          if (err < 0) {
+            close(meta_file);
+            if (state_.no_compress)
+		          close(segmenting_fd);
+		        else
+		          fclose(segmenting_file);
+            if (in_ssd)
+              unlink(meta_fullpath);
+            free(meta_fullpath);
+            #ifdef DEBUG
+              printf("resetting rabin\n");
+            #endif
+            rabin_reset(rabin);
+            return -1;
+          }
+        }
         else {
           s3_bucket[0] = current_hash_string[0];
           s3_bucket[1] = current_hash_string[1];
@@ -391,6 +422,7 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
           current_segment->ref_count = 1;
           sprintf(log_string, "adding %s to the hash table\n", current_segment->hash);
           log_write(log_string);
+          printf("segment: %s %d\n", current_hash_string, segment_len);  
           HASH_ADD_STR(segment_hash_table, hash, current_segment);
         }
         #ifdef DEBUG
@@ -997,7 +1029,6 @@ int dedup_read(const char *path, char *buffer, size_t size,
       close(data_file);
       return bytes_read;
     }
-    update_hash_table_file();
     HASH_FIND_STR(segment_hash_table, segment_hash, current_segment);
     if (current_segment == NULL) {
       close(meta_file);
@@ -1012,11 +1043,11 @@ int dedup_read(const char *path, char *buffer, size_t size,
   }
   segment_offset = offset - current_offset;
   while (total_bytes_read < size) {
-    if (size-total_bytes_read > current_segment->length) {
-      bytes_to_read = current_segment->length;
+    if (size-total_bytes_read > current_segment->length-segment_offset) {
+      bytes_to_read = current_segment->length-segment_offset;
     }
     else {
-      bytes_to_read = size-total_bytes_read;
+      bytes_to_read = size-total_bytes_read-segment_offset;
     }
     if (read_segment(segment_hash, bytes_to_read, buffer+total_bytes_read,
                      segment_offset)) {
@@ -1222,6 +1253,8 @@ int dedup_unlink_segments(const char *meta_path) {
     HASH_FIND_STR(segment_hash_table, current_hash, current_segment);
     if (current_segment == NULL)
       continue;
+    sprintf(log_string, "unlinking segment %s, ref_count=%d\n", current_hash, current_segment->ref_count);
+    log_write(log_string);
     if (current_segment->ref_count > 1) {
       current_segment->ref_count--;
     }
@@ -1230,12 +1263,15 @@ int dedup_unlink_segments(const char *meta_path) {
       log_write(log_string);
       HASH_DEL(segment_hash_table, current_segment);
       free(current_segment);
+      current_segment = NULL;
       s3_bucket[0] = current_hash[0];
       s3_bucket[1] = current_hash[1];
       s3_bucket[2] = current_hash[2];
       s3_bucket[3] = 0;
       cloud_delete_object(s3_bucket, current_hash+3);
     }
+    sprintf(log_string, "done unlinking segment %s, ref_count=%d\n", current_hash, ((current_segment == NULL) ? 0 : current_segment->ref_count));
+    log_write(log_string);
   }
   close(meta_file);
   return update_hash_table_file();
