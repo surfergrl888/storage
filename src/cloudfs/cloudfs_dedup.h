@@ -17,6 +17,8 @@ struct segment_hash_struct {
   UT_hash_handle hh;
 };
 
+int get_segment_size(char *hash);
+
 void dedup_init();
 void dedup_destroy();
 int dedup_migrate_file(const char *path, struct fuse_file_info *file_info,

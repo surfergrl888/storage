@@ -15,14 +15,18 @@ build/obj/cloudapi.o: cloud-lib/cloudapi.c /usr/include/ctype.h \
  /usr/lib/gcc/i686-linux-gnu/4.4.5/include/stddef.h /usr/include/libio.h \
  /usr/include/_G_config.h /usr/include/wchar.h \
  /usr/lib/gcc/i686-linux-gnu/4.4.5/include/stdarg.h \
- /usr/include/bits/sys_errlist.h /usr/include/stdlib.h \
+ /usr/include/bits/sys_errlist.h /usr/include/bits/stdio.h \
+ /usr/include/bits/stdio2.h /usr/include/stdlib.h \
  /usr/include/bits/waitflags.h /usr/include/bits/waitstatus.h \
  /usr/include/sys/types.h /usr/include/time.h /usr/include/sys/select.h \
  /usr/include/bits/select.h /usr/include/bits/sigset.h \
  /usr/include/bits/time.h /usr/include/sys/sysmacros.h \
  /usr/include/bits/pthreadtypes.h /usr/include/alloca.h \
- /usr/include/string.h /usr/include/strings.h /usr/include/sys/stat.h \
- /usr/include/bits/stat.h /usr/include/unistd.h \
+ /usr/include/bits/stdlib.h /usr/include/string.h \
+ /usr/include/bits/string.h /usr/include/bits/string2.h \
+ /usr/include/bits/string3.h /usr/include/strings.h \
+ /usr/include/sys/stat.h /usr/include/bits/stat.h /usr/include/unistd.h \
  /usr/include/bits/posix_opt.h /usr/include/bits/environments.h \
- /usr/include/bits/confname.h cloud-lib/cloudapi.h include/libs3.h \
- /usr/include/stdint.h /usr/include/bits/wchar.h
+ /usr/include/bits/confname.h /usr/include/bits/unistd.h \
+ cloud-lib/cloudapi.h include/libs3.h /usr/include/stdint.h \
+ /usr/include/bits/wchar.h

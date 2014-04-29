@@ -23,6 +23,7 @@
 #include "uthash.h"
 #include "cloudfs.h"
 #include "compressapi.h"
+#include "cloudfs_cache.h"
 #include "cloudfs_dedup.h"
 #include "dedup.h"
 
@@ -39,9 +40,21 @@ char log_string[100];
 
 struct segment_hash_struct *segment_hash_table = NULL;
 
+int get_segment_size(char *hash) {
+  struct segment_hash_struct *segment;
+  
+  HASH_FIND_STR(segment_hash_table, hash, segment);
+  if (segment != NULL) {
+    return segment->length;
+  }
+  else {
+    return 0;
+  }
+}
+
 void rebuild_hash_table() {
   int hash_table_file, err;
-  char *hash_table_file_path;
+  char *hash_table_file_path, *cache_path;
   struct stat temp;
   struct segment_hash_struct *current_segment;
   
@@ -64,6 +77,14 @@ void rebuild_hash_table() {
             current_segment->ref_count);
     log_write(log_string);
     HASH_ADD_STR(segment_hash_table, hash, current_segment);
+    if (!state_.no_cache) {
+      cache_path = get_cache_fullpath(current_segment->hash);
+      err = stat(cache_path, &temp);
+      if (!(err && (errno == ENOENT))) {
+        add_to_cache(current_segment->hash);
+      }
+      free(cache_path);
+    }
   }
   free(hash_table_file_path);
   close(hash_table_file);
@@ -71,7 +92,7 @@ void rebuild_hash_table() {
 
 int update_hash_table_file() {
   char *hash_table_file_path;
-  int hash_table_file, i;
+  int hash_table_file;
   struct segment_hash_struct *current_segment;
   
   hash_table_file_path = cloudfs_get_fullpath(HASH_TABLE_FILE);
@@ -107,6 +128,9 @@ void dedup_init() {
   min_seg_size = state_.avg_seg_size-DEDUP_VARIATION(state_.avg_seg_size);
   rabin = rabin_init(state_.rabin_window_size, state_.avg_seg_size,
                      min_seg_size, max_seg_size);
+  if (!state_.no_cache) {
+    init_cache();
+  }
   rebuild_hash_table();
 }
 
@@ -821,6 +845,7 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
 
 int read_segment(char *hash, int bytes_to_read, char *buf,
                  off_t offset) {
+  struct segment_hash_struct *segment;
   int err;
   S3Status status;
   char s3_bucket[4];
@@ -830,102 +855,119 @@ int read_segment(char *hash, int bytes_to_read, char *buf,
   
   sprintf(log_string, "reading segment %s, %d bytes, offset %ld\n", hash, bytes_to_read, offset);
   log_write(log_string);
-  data_path = cloudfs_get_fullpath(SEGMENT_TEMP_FILE);
-  s3_bucket[0] = hash[0];
-  s3_bucket[1] = hash[1];
-  s3_bucket[2] = hash[2];
-  s3_bucket[3] = 0;
-  if (!state_.no_compress) {
-    compress_temp_path = cloudfs_get_fullpath(COMPRESS_TEMP_FILE);
-    temp_fd = open(compress_temp_path, O_RDWR|O_CREAT,
-                     S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-    if (temp_fd == NULL) {
-      free(compress_temp_path);
-      free(data_path);
-      sprintf(log_string, "read_segment line 783: %d\n", errno);
-      log_write(log_string);
-      return -1;
-    }
-    outfile = temp_fd;
-    status = cloud_get_object(s3_bucket, hash+3, get_buffer);
-    if (status != S3StatusOK) {
-      #ifdef DEBUG
-        cloud_print_error();
-      #endif
-      sprintf(log_string, "read_segment line 793: %d\n", status);
-      log_write(log_string);
-      close(temp_fd);
-      unlink(compress_temp_path);
-      free(data_path);
-      free(compress_temp_path);
-      return -1;
-    }
-    err = lseek(temp_fd, 0, SEEK_SET);
-    if (err < 0) {
-      sprintf(log_string, "read_segment line 803: %d\n", errno);
-      log_write(log_string);
-      close(temp_fd);
-      unlink(compress_temp_path);
-      free(data_path);
-      free(compress_temp_path);
-      return -1;
-    }
-    temp_file = fdopen(temp_fd, "r+");
-    if (temp_file == NULL) {
-      sprintf(log_string, "read_segment line 813: %d\n", errno);
-      log_write(log_string);
-      close(temp_fd);
-      free(data_path);
-      unlink(compress_temp_path);
-      free(compress_temp_path);
-      return -1;
-    }
-    data_file = fopen(data_path, "w+");
-    if (data_file == NULL) {
-      sprintf(log_string, "read_segment line 823: %d\n", errno);
-      log_write(log_string);
-      fclose(temp_file);
-      unlink(compress_temp_path);
-      free(compress_temp_path);
-      free(data_path);
-      return -1;
-    }
-    err = inf(temp_file, data_file);
-    if (err != Z_OK) {
-      sprintf(log_string, "read_segment line 833: %d\n", errno);
-      log_write(log_string);
-      fclose(data_file);
-      unlink(data_path);
-      fclose(temp_file);
-      unlink(compress_temp_path);
-      free(compress_temp_path);
-      free(data_path);
-      return -1;
-    }
-    fclose(data_file);
-    fclose(temp_file);
-    unlink(compress_temp_path);
-    free(compress_temp_path);
+  if (state_.no_cache) {
+    data_path = cloudfs_get_fullpath(SEGMENT_TEMP_FILE);
   }
   else {
-    data_fd = open(data_path, O_RDWR|O_CREAT,
-                     S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-    if (data_fd == NULL) {
-      free(data_path);
-      return -1;
+    data_path = get_cache_fullpath(hash);
+  }
+  if (!state_.no_cache || (state_.no_cache && !in_cache(hash))) {
+    if (!state_.no_cache) {
+      HASH_FIND_STR(segment_hash_table, hash, segment);
+      make_space_in_cache(segment->length);
     }
-    outfile = data_fd;
-    status = cloud_get_object(s3_bucket, hash+3, get_buffer);
-    if (status != S3StatusOK) {
-      #ifdef DEBUG
-        cloud_print_error();
-      #endif
+    s3_bucket[0] = hash[0];
+    s3_bucket[1] = hash[1];
+    s3_bucket[2] = hash[2];
+    s3_bucket[3] = 0;
+    if (!state_.no_compress) {
+      compress_temp_path = cloudfs_get_fullpath(COMPRESS_TEMP_FILE);
+      temp_fd = open(compress_temp_path, O_RDWR|O_CREAT,
+                       S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+      if (temp_fd == NULL) {
+        free(compress_temp_path);
+        free(data_path);
+        sprintf(log_string, "read_segment line 783: %d\n", errno);
+        log_write(log_string);
+        return -1;
+      }
+      outfile = temp_fd;
+      status = cloud_get_object(s3_bucket, hash+3, get_buffer);
+      if (status != S3StatusOK) {
+        #ifdef DEBUG
+          cloud_print_error();
+        #endif
+        sprintf(log_string, "read_segment line 793: %d\n", status);
+        log_write(log_string);
+        close(temp_fd);
+        unlink(compress_temp_path);
+        free(data_path);
+        free(compress_temp_path);
+        return -1;
+      }
+      err = lseek(temp_fd, 0, SEEK_SET);
+      if (err < 0) {
+        sprintf(log_string, "read_segment line 803: %d\n", errno);
+        log_write(log_string);
+        close(temp_fd);
+        unlink(compress_temp_path);
+        free(data_path);
+        free(compress_temp_path);
+        return -1;
+      }
+      temp_file = fdopen(temp_fd, "r+");
+      if (temp_file == NULL) {
+        sprintf(log_string, "read_segment line 813: %d\n", errno);
+        log_write(log_string);
+        close(temp_fd);
+        free(data_path);
+        unlink(compress_temp_path);
+        free(compress_temp_path);
+        return -1;
+      }
+      data_file = fopen(data_path, "w+");
+      if (data_file == NULL) {
+        sprintf(log_string, "read_segment line 823: %d\n", errno);
+        log_write(log_string);
+        fclose(temp_file);
+        unlink(compress_temp_path);
+        free(compress_temp_path);
+        free(data_path);
+        return -1;
+      }
+      err = inf(temp_file, data_file);
+      if (err != Z_OK) {
+        sprintf(log_string, "read_segment line 833: %d\n", errno);
+        log_write(log_string);
+        fclose(data_file);
+        unlink(data_path);
+        fclose(temp_file);
+        unlink(compress_temp_path);
+        free(compress_temp_path);
+        free(data_path);
+        return -1;
+      }
+      fclose(data_file);
+      fclose(temp_file);
+      unlink(compress_temp_path);
+      free(compress_temp_path);
+    }
+    else {
+      data_fd = open(data_path, O_RDWR|O_CREAT,
+                       S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+      if (data_fd == NULL) {
+        free(data_path);
+        return -1;
+      }
+      outfile = data_fd;
+      status = cloud_get_object(s3_bucket, hash+3, get_buffer);
+      if (status != S3StatusOK) {
+        #ifdef DEBUG
+          cloud_print_error();
+        #endif
+        close(data_fd);
+        unlink(data_path);
+        free(data_path);
+        return -1;
+      }
       close(data_fd);
-      unlink(data_path);
-      free(data_path);
-      return -1;
     }
-    close(data_fd);
+    if (!state_.no_cache) {
+      add_to_cache(hash);
+    }
+  }
+  else {
+    update_in_cache(hash);
   }
   data_fd = open(data_path, O_RDONLY);
   if (data_fd == NULL) {
@@ -953,7 +995,8 @@ int read_segment(char *hash, int bytes_to_read, char *buf,
     return -1;
   }
   close(data_fd);
-  unlink(data_path);
+  if (state_.no_cache)
+    unlink(data_path);
   free(data_path);
   return 0;
 }
@@ -1215,6 +1258,9 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
   else {
     sprintf(log_string, "removing %s from the hash table\n", segment_hash);
     log_write(log_string);
+    if (!state_.no_cache) {
+      remove_from_cache(segment_hash);
+    }
     HASH_DEL(segment_hash_table, last_segment);
     free(last_segment);
     s3_bucket[0] = segment_hash[0];
@@ -1261,6 +1307,9 @@ int dedup_unlink_segments(const char *meta_path) {
     else {
       sprintf(log_string, "removing %s from the hash table\n", current_segment->hash);
       log_write(log_string);
+      if (!state_.no_cache) {
+        remove_from_cache(current_hash);
+      }
       HASH_DEL(segment_hash_table, current_segment);
       free(current_segment);
       current_segment = NULL;
