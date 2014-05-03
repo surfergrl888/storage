@@ -184,7 +184,7 @@ void *cloudfs_init(struct fuse_conn_info *conn UNUSED)
 {
   cloud_init(state_.hostname);
   #ifdef LOGGING_ENABLED
-  log_file = fopen(LOGFILE, "w+");
+  log_file = fopen(LOGFILE, "a+");
   #endif
   if (!state_.no_dedup) {
     dedup_init();

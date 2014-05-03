@@ -4,7 +4,7 @@
 #include "uthash.h"
 
 //#define DEBUG
-#define LOGGING_ENABLED
+//#define LOGGING_ENABLED
 #define MAX_PATH_LEN 4096
 #define MAX_HOSTNAME_LEN 1024
 extern struct cloudfs_state state_;

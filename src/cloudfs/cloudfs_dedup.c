@@ -62,7 +62,7 @@
 #include "cloudfs_dedup.h"
 #include "dedup.h"
 
-#define DEDUP_VARIATION(x) (x/16)
+#define DEDUP_VARIATION(x) (x/2)
 #define HASH_TABLE_FILE "/.hash_table"
 #define META_SEGMENT_LIST sizeof(off_t)+3*sizeof(time_t)
 #define COMPRESS_TEMP_FILE "/.temp_compress"
@@ -179,8 +179,8 @@ void dedup_init() {
   #ifdef LOGGING_ENABLED
   log_write("in dedup_init\n");
   #endif
-  max_seg_size = state_.avg_seg_size+DEDUP_VARIATION(state_.avg_seg_size);
-  min_seg_size = state_.avg_seg_size-DEDUP_VARIATION(state_.avg_seg_size);
+  max_seg_size = state_.avg_seg_size<<1;//+DEDUP_VARIATION(state_.avg_seg_size);
+  min_seg_size = state_.avg_seg_size>>1;//-DEDUP_VARIATION(state_.avg_seg_size);
   rabin = rabin_init(state_.rabin_window_size, state_.avg_seg_size,
                      min_seg_size, max_seg_size);
   if (!state_.no_cache) {
@@ -918,15 +918,30 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
       free(meta_fullpath);
 	  }
 	}
-	close(meta_file);
-	if (in_ssd) {
-	  err = ftruncate(segmenting_fd, 0);
-	}
-	if (state_.no_compress)
-	  close(segmenting_fd);
-  else
-		fclose(segmenting_file);
+  close(meta_file);
   rabin_reset(rabin);
+  if (state_.no_compress)
+    close(segmenting_fd);
+  else
+    fclose(segmenting_file);
+  if (in_ssd) {
+    err = lseek(file_info->fh, 0, SEEK_SET);
+    if (err < 0) {
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "migrate_file failure 26: errno=%d\n", errno);
+      log_write(log_string);
+      #endif
+      return -1;
+    }
+    err = ftruncate(file_info->fh, 0);
+    if (err < 0) {
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "migrate_file failure 27: errno=%d\n", errno);
+      log_write(log_string);
+      #endif
+      return -1;
+    }
+  }
   #ifdef DEBUG
     printf("done migrating file\n");
   #endif
