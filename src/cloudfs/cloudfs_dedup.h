@@ -24,7 +24,7 @@ void dedup_destroy();
 int dedup_migrate_file(const char *path, struct fuse_file_info *file_info,
                        int in_ssd, char move_entire_file);
 int dedup_read(const char *path, char *buffer, size_t size,
-               off_t offset, struct fuse_file_info *file_info);
+               off_t offset);
 int dedup_get_last_segment(const char *data_target_path, int meta_file);
 int dedup_unlink_segments(const char *meta_path);
 

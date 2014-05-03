@@ -1,3 +1,27 @@
+/* cloudfs_cache.c 
+ * 
+ * This file contains all the cache management functions.  The cache
+ * replacement policy is LRU, and is managed in memory as a linked list, with
+ * the most recently used segment at the head of the list, and the least
+ * recently used segment at the tail.  So, to add a segment to the cache, we
+ * just insert it in at the head of the list, and to make space for new
+ * segments, we pull elements from the tail of the list.  The cache is only
+ * added to on reads, since writes go to a separate file and the written
+ * data is only segmented on release().  If we're accessing something already
+ * in the cache, we pull it out, and reinsert it at the head to enforce the
+ * ordering.
+ *
+ * We also keep track of the total size of the data stored in the cache, so
+ * we know whether we have enough space in the cache for a new segment, and if
+ * not, when to stop removing items from the cache (essentially, when we've
+ * cleared up enough space).  Since the least recently used items are at the
+ * tail of the list, the list is also doubly linked so it's much faster to pull
+ * items from the tail.
+ *
+ * The cache is stored in a hidden directory in the root directory, and each
+ * segment file's name is just the hash string.
+ */
+
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -25,6 +49,7 @@
 struct cache_entry_node *cache_head = NULL;
 int current_cache_size = 0;
 
+// Each segment is stored in /.cache/[hash]
 char *get_cache_fullpath(char *hash) {
   char cache_path[1+7+MD5_DIGEST_LENGTH*2+1];
   
@@ -32,6 +57,10 @@ char *get_cache_fullpath(char *hash) {
   return cloudfs_get_fullpath(cache_path);
 }
 
+// Here we essentially make sure that the cache size specified is actually big
+// enough to store at least one segment, and we make sure that the cache folder
+// either exists or is created sucesssfully.  If not, we disable caching since
+// we need enough space, AND a folder to put everything in.
 void init_cache() {
   struct stat temp;
   

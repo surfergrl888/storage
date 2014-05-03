@@ -1,3 +1,27 @@
+/* cloudfs.c
+ * 
+ * This file implements the basic (part 1) functionality of cloudfs.
+ * 
+ * Metadata is stored in a hidden file, "/.[inode # of the original file]".
+ * We only store the file size and timestamps there, since everything else is
+ * kept on the original SSD file, which is truncated to 0 bytes when we
+ * migrate the data to the cloud.  We only make a metadata file for data
+ * migrated to the cloud, so the way we know if a file is stored on the SSD
+ * or the cloud is by checking for the existence of the metadata file. The
+ * inode number is used for naming since it's a unique identifier.  We could
+ * just use the path, but then we would have to worry about directory
+ * permissions or making directories (depending on the implementation), so
+ * using the inode number allows us to put the metadata in the root directory,
+ * where we know we can write, without having to worry about collisions in
+ * naming.
+ * For parts 2+3, the hash mappings are stored in the metadata file immediately
+ * after the timestamps.
+ * 
+ * Cloud file data is stored in /.[inode # of the original file]_data. For part
+ * 1, this is the entire file, and for parts 2 and 3, this is the end of the
+ * file, which we're modifying. [the cache is separate, see cloudfs_cache.c]
+ */
+
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -24,7 +48,10 @@
 
 #define UNUSED __attribute__((unused))
 #define SUCCESS 0
-#define LOGFILE "./cloudfs.log"
+// Autolab debugging version
+//#define LOGFILE "./cloudfs.log"
+// local debugging version
+#define LOGFILE "/home/guest/storage/src/scripts/cloudfs.log"
 #define META_TIMESTAMPS sizeof(off_t)
 #define UTIME_NOW	((1l << 30) - 1l)
 #define UTIME_OMIT	((1l << 30) - 2l)
@@ -71,7 +98,7 @@ int bucket_exists(char *bucket) {
 
 int get_weak_hash(const char *path)
 {
-  int i;
+  unsigned int i;
   int sum = 0;;
   
   for (i=0; i<strlen(path); i++) {
@@ -83,7 +110,7 @@ int get_weak_hash(const char *path)
 }
 
 char *get_s3_key(const char *path) {
-  int i;
+  unsigned int i;
   
   char *key = malloc(strlen(path)+1);
   strcpy(key, path);
@@ -156,7 +183,9 @@ static int UNUSED cloudfs_error(char *error_str)
 void *cloudfs_init(struct fuse_conn_info *conn UNUSED)
 {
   cloud_init(state_.hostname);
-  log_file = fopen(LOGFILE, "a+");
+  #ifdef LOGGING_ENABLED
+  log_file = fopen(LOGFILE, "w+");
+  #endif
   if (!state_.no_dedup) {
     dedup_init();
   }
@@ -168,7 +197,9 @@ void cloudfs_destroy(void *data UNUSED) {
   if (!state_.no_dedup) {
     dedup_destroy();
   }
+  #ifdef LOGGING_ENABLED
   fclose(log_file);
+  #endif
 }
 
 /* Directory operations */
@@ -278,6 +309,9 @@ int cloudfs_chmod(const char *path, mode_t mode)
   }
   meta_file = open(fullpath, O_WRONLY);
   free(fullpath);
+  if (meta_file < 0) {
+    return -errno;
+  }
   err = lseek(meta_file, META_ATTRTIME_OFFSET, SEEK_SET);
   if (err < 0) {
     close(meta_file);
@@ -339,29 +373,40 @@ int cloudfs_getattr(const char *path, struct stat *statbuf)
     }
     metadata_file = open(fullpath, O_RDONLY);
     free(fullpath);
+    if (metadata_file < 0) {
+      return -errno;
+    }
     if (read(metadata_file, &(statbuf->st_size), sizeof(off_t)) != 
         sizeof(off_t)) {
+      #ifdef DEBUG
       printf("Error with metadata - getting size!\n");
+      #endif
       close(metadata_file);
-      return -1;
+      return -errno;
     }
     if (read(metadata_file, &(statbuf->st_atime), sizeof(time_t)) !=
         sizeof(time_t)){
+      #ifdef DEBUG
       printf("Error with metadata - getting timestamps!\n");
+      #endif
       close(metadata_file);
-      return -1;
+      return -errno;
     }
     if (read(metadata_file, &(statbuf->st_mtime), sizeof(time_t)) !=
         sizeof(time_t)){
+      #ifdef DEBUG
       printf("Error with metadata - getting timestamps!\n");
+      #endif
       close(metadata_file);
-      return -1;
+      return -errno;
     }
     if (read(metadata_file, &(statbuf->st_ctime), sizeof(time_t)) !=
         sizeof(time_t)){
+      #ifdef DEBUG
       printf("Error with metadata - getting timestamps!\n");
+      #endif
       close(metadata_file);
-      return -1;
+      return -errno;
     }
     statbuf->st_blocks = statbuf->st_size/512;
     close(metadata_file);
@@ -416,6 +461,9 @@ int cloudfs_setxattr(const char *path, const char *name, const char *value,
   }
   meta_file = open(fullpath, O_RDWR);
   free(fullpath);
+  if (meta_file < 0) {
+    return -1;
+  }
   err = lseek(meta_file, META_ATTRTIME_OFFSET, SEEK_SET);
   if (err < 0) {
     close(meta_file);
@@ -474,6 +522,9 @@ int cloudfs_utimens(const char *path, const struct timespec tv[2]) {
   metadata_file = open(meta_fullpath, O_RDWR);
   free(meta_fullpath);
   free(fullpath);
+  if (metadata_file < 0) {
+    return -1;
+  }
   err = lseek(metadata_file, META_TIMESTAMPS, SEEK_SET);
   if (err < 0) {
     close(metadata_file);
@@ -561,9 +612,16 @@ int cloudfs_unlink(const char *path) {
   char *s3_key;
   int err;
   char s3_bucket[11];
+  #ifdef LOGGING_ENABLED
+  char log_string[100];
+  #endif
   
   #ifdef DEBUG
     printf("call to unlink: %s\n", path);
+  #endif
+  #ifdef LOGGING_ENABLED
+  sprintf(log_string, "call to unlink: path=%s\n", path);
+  log_write(log_string);
   #endif
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
   err = stat(meta_fullpath, &temp);
@@ -603,11 +661,13 @@ int cloudfs_unlink(const char *path) {
 int cloudfs_read(const char *path, char *buffer, size_t size,
                  off_t offset, struct fuse_file_info *file_info)
 {
-  int err, meta_file;
-  char *meta_fullpath;
+  int err, meta_file, data_file;
+  char *meta_fullpath, *fullpath;
   size_t retval = 0;
   struct timespec cur_time;
+  #ifdef LOGGING_ENABLED
   char log_string[100];
+  #endif
   struct stat temp;
   
   #ifdef DEBUG
@@ -620,7 +680,7 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
     }
     
     retval = read(file_info->fh, buffer, size);
-    if (retval == -1) {
+    if ((signed int)retval == -1) {
       return -errno;
     }
   }
@@ -630,54 +690,87 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
   if (err && (errno == ENOENT)) {
     free(meta_fullpath);
     if (!state_.no_dedup) {
-      err = lseek(file_info->fh, offset, SEEK_SET);
+      if ((signed int)file_info->fh < 0) {
+        fullpath = cloudfs_get_fullpath(path);
+        data_file = open(fullpath, file_info->flags);
+        free(fullpath);
+        if (data_file < 0) {
+          #ifdef LOGGING_ENABLED
+          sprintf(log_string, "read failure 0: path=%s, errno=%d\n", path,errno);
+          log_write(log_string);
+          #endif
+          return -errno;
+        }
+      }
+      else {
+        data_file = file_info->fh;
+      }
+      err = lseek(data_file, offset, SEEK_SET);
       if (err < 0) {
-        sprintf(log_string, "read: line 635 %s, %d\n", path, errno);
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "read failure 1: path=%s, errno=%d\n", path,errno);
         log_write(log_string);
+        #endif
+        close(data_file);
         return -errno;
       }
       
-      retval = read(file_info->fh, buffer, size);
-      if (retval == -1) {
-        sprintf(log_string, "read: line 642 %s, %d\n", path, errno);
+      retval = read(data_file, buffer, size);
+      if ((signed int)retval == -1) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "read failure 2: path=%s, errno=%d\n", path,errno);
         log_write(log_string);
+        #endif
+        close(data_file);
         return -errno;
       }
+      close(data_file);
     }
     return retval;
   }
   if (!state_.no_dedup) {
-    retval = dedup_read(path, buffer, size, offset, file_info);
-    if (retval == -1) {
-      sprintf(log_string, "read: line 652 %s, %d\n", path, errno);
+    retval = dedup_read(path, buffer, size, offset);
+    if ((signed int)retval == -1) {
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "read failure 3: path=%s, errno=%d\n", path,errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
   }
   meta_file = open(meta_fullpath, O_WRONLY);
   free(meta_fullpath);
-  if (meta_file == NULL) {
-    sprintf(log_string, "read: line 660 %s, %d\n", path, errno);
+  if (meta_file < 0) {
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "read failure 4: path=%s, errno=%d\n", path, errno);
     log_write(log_string);
+    #endif
     return -errno;
   }
   err = lseek(meta_file, META_ATIME_OFFSET, SEEK_SET);
   if (err < 0) {
     close(meta_file);
-    sprintf(log_string, "read: line 667 %s, %d\n", path, errno);
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "read failure 5: path=%s, errno=%d\n", path, errno);
     log_write(log_string);
+    #endif
     return -errno;
   }
   err = clock_gettime(CLOCK_REALTIME, &cur_time);
   if (write(meta_file, &(cur_time.tv_sec), sizeof(time_t)) != sizeof(time_t)){
     close(meta_file);
-    sprintf(log_string, "read: line 674 %s, %d\n", path, errno);
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "read failure 6: path=%s, errno=%d\n", path, errno);
     log_write(log_string);
+    #endif
     return -errno;
   }
   close(meta_file);
-  sprintf(log_string, "read: line 679 %s, %d\n", path, retval);
+  #ifdef LOGGING_ENABLED
+  sprintf(log_string, "cloud read done: path=%s, total_bytes_read=%d\n", path,
+          retval);
   log_write(log_string);
+  #endif
   return retval;
 }
 
@@ -685,7 +778,9 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
                   off_t offset, struct fuse_file_info *file_info)
 {
   int err, meta_file, i, in_ssd;
+  #ifdef LOGGING_ENABLED
   char log_string[100];
+  #endif
   char *meta_fullpath, *data_fullpath;
   struct stat info;
   size_t retval = 0;
@@ -702,7 +797,7 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
     }
     
     retval = write(file_info->fh, buffer, size);
-    if (retval == -1) {
+    if ((signed int)retval == -1) {
       return -errno;
     }
   }
@@ -715,15 +810,21 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
     if (!state_.no_dedup) {
       err = lseek(file_info->fh, offset, SEEK_SET);
       if (err < 0) {
-        sprintf(log_string, "write: line 718 %s, %d\n", path, errno);
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "write failure 1: path=%s, errno=%d\n", path,
+                errno);
         log_write(log_string);
+        #endif
         return -errno;
       }
       
       retval = write(file_info->fh, buffer, size);
-      if (retval == -1) {
-        sprintf(log_string, "write: line 725 %s, %d\n", path, errno);
+      if ((signed int)retval == -1) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "write failure 2: path=%s, errno=%d\n", path,
+                errno);
         log_write(log_string);
+        #endif
         return -errno;
       }
       
@@ -739,108 +840,138 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
         
       }*/
     }
-    sprintf(log_string, "write: line 742 %s, %d\n", path, retval);
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "ssd write done: path=%s, bytes_written=%d\n", path, retval);
     log_write(log_string);
+    #endif
     return retval;
   }
   meta_file = open(meta_fullpath, O_RDWR);
   free(meta_fullpath);
-  if (meta_file == NULL)
+  if (meta_file < 0)
     return -errno;
   if (state_.no_dedup) {
     err = fstat(file_info->fh, &info);
     if (err) {
       close(meta_file);
-      sprintf(log_string, "write: line 754 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 4: path=%s, errno=%d\n", path, errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
     if (write(meta_file, &(info.st_size), sizeof(off_t)) != sizeof(off_t)) {
       close(meta_file);
-      sprintf(log_string, "write: line 760 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 5: path=%s, errno=%d\n", path, errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
   }
   else {
-    if (file_info->fh == NULL) {
+    if ((signed int)file_info->fh < 0) {
       data_fullpath = cloudfs_get_data_fullpath(path);
       err = stat(data_fullpath, &info);
       if (err && (errno == ENOENT)) {
         if (dedup_get_last_segment(data_fullpath, meta_file)) {
           close(meta_file);
           free(data_fullpath);
-          sprintf(log_string, "write: line 773 %s, %d\n", path, errno);
+          #ifdef LOGGING_ENABLED
+          sprintf(log_string, "write failure 6: path=%s, errno=%d\n", path,
+                  errno);
           log_write(log_string);
+          #endif
           return -errno;
         }
       }
       file_info->fh = open(data_fullpath, O_RDWR);
       free(data_fullpath);
-      if (file_info->fh == NULL) {
+      if ((signed int)file_info->fh < 0) {
         close(meta_file);
-        sprintf(log_string, "write: line 782 %s, %d\n", path, errno);
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "write failure 7: path=%s, errno=%d\n", path,
+                errno);
         log_write(log_string);
+        #endif
         return -errno;
       }
     }
     err = lseek(file_info->fh, 0, SEEK_END);
     if (err < 0) {
       close(meta_file);
-      sprintf(log_string, "write: line 790 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 8: path=%s, errno=%d\n", path, errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
     
     retval = write(file_info->fh, buffer, size);
-    if (retval == -1) {
-      sprintf(log_string, "write: line 797 %s, %d\n", path, errno);
+    if ((signed int)retval == -1) {
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 9: path=%s, errno=%d\n", path, errno);
       log_write(log_string);
+      #endif
       close(meta_file);
       return -errno;
     }
     
     fstat(file_info->fh, &info);
-    if (info.st_size >= max_seg_size) {
+    /*if (info.st_size >= max_seg_size) {
       err = lseek(file_info->fh, 0, SEEK_SET);
       if (err < 0) {
         close(meta_file);
-        sprintf(log_string, "write: line 808 %s, %d\n", path, errno);
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "write failure 10: path=%s, errno=%d\n", path,
+                errno);
         log_write(log_string);
+        #endif
         return -errno;
       }
       if (dedup_migrate_file(path, file_info, in_ssd, 0)) {
         close(meta_file);
-        sprintf(log_string, "write: line 814 %s, %d\n", path, errno);
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "write failure 11: path=%s, errno=%d\n", path,
+                errno);
         log_write(log_string);
+        #endif
         return -errno;
       }
-    }
+    }*/
     err = lseek(meta_file, 0, SEEK_SET);
     if (err < 0) {
       close(meta_file);
-      sprintf(log_string, "write: line 822 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 12: path=%s, errno=%d\n", path,errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
     if (read(meta_file, &new_size, sizeof(off_t)) != sizeof(off_t)) {
       close(meta_file);
-      sprintf(log_string, "write: line 828 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 13: path=%s, errno=%d\n", path,errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
     err = lseek(meta_file, 0, SEEK_SET);
     if (err < 0) {
       close(meta_file);
-      sprintf(log_string, "write: line 835 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 14: path=%s, errno=%d\n", path,errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
     new_size += size;
     if (write(meta_file, &new_size, sizeof(off_t)) != sizeof(off_t)) {
       close(meta_file);
-      sprintf(log_string, "write: line 842 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 15: path=%s, errno=%d\n", path,errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
   }
@@ -849,14 +980,19 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
     if (write(meta_file, &(cur_time.tv_sec), sizeof(time_t)) !=
         sizeof(time_t)){
       close(meta_file);
-      sprintf(log_string, "write: line 852 %s, %d\n", path, errno);
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "write failure 16: path=%s, errno=%d\n", path,errno);
       log_write(log_string);
+      #endif
       return -errno;
     }
   }
   close(meta_file);
-  sprintf(log_string, "write: line 858 %s, %d\n", path, retval);
+  #ifdef LOGGING_ENABLED
+  sprintf(log_string, "cloud write done: path=%s, bytes_written=%d\n", path,
+          retval);
   log_write(log_string);
+  #endif
   return retval;
 }
 
@@ -868,11 +1004,17 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   S3Status status;
   char s3_bucket[11];
   int err, already_in_ssd;
+  #ifdef LOGGING_ENABLED
+  char log_string[100];
+  #endif
   
   #ifdef DEBUG
     printf("call to open: %s\n", path);
   #endif
-  printf ("%d\n", (O_RDONLY));
+  #ifdef LOGGING_ENABLED
+  sprintf(log_string, "call to open: path=%s\n", path);
+  log_write(log_string);
+  #endif
   // The first thing we do is check the permissions, which are stored with the
   // proxy file
   char *fullpath = cloudfs_get_fullpath(path);
@@ -900,12 +1042,14 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
   err = stat(meta_fullpath, &temp);
   if (err && (errno == ENOENT)) {
+    free(meta_fullpath);
+    if (state_.no_dedup && ((file_info->flags & 3) == O_RDONLY))
+      return SUCCESS;
     fullpath = cloudfs_get_fullpath(path);
     file_info->fh = open(fullpath, file_info->flags);
     free(fullpath);
-    free(meta_fullpath);
     
-    if (file_info->fh == NULL)
+    if ((signed int)file_info->fh < 0)
        return -errno;
   }
   else {
@@ -916,7 +1060,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       already_in_ssd = !(err && (errno == ENOENT));
       file_info->fh = open(data_fullpath, O_RDWR|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
       free(data_fullpath);
-      if (file_info->fh == NULL)
+      if ((signed int)file_info->fh < 0)
         return -errno;
       
       if (!already_in_ssd) {
@@ -936,7 +1080,7 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
       }
     }
     else
-      file_info->fh = NULL;
+      file_info->fh = -1;
   }
   if (!state_.no_dedup && ((file_info->flags & 3) == O_RDONLY)) {
     return SUCCESS;
@@ -963,13 +1107,18 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
   char s3_bucket[11];
   int meta_file;
   int err, in_ssd;
+  #ifdef LOGGING_ENABLED
+  char log_string[100];
+  #endif
   
   #ifdef DEBUG
     printf("call to release: %s\n", path);
   #endif
+  #ifdef LOGGING_ENABLED
+  sprintf(log_string, "call to release: path=%s\n", path);
+  log_write(log_string);
+  #endif
   if (!state_.no_dedup && ((file_info->flags & 3) == O_RDONLY)) {
-    if (file_info->fh != NULL)
-      close(file_info->fh);
     return SUCCESS;
   }
   fstat(file_info->fh, &info);
@@ -981,7 +1130,7 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
                                            (info.st_size <= state_.threshold))) {
     reference_count->ref_count--;
     free(meta_fullpath);
-    if (file_info->fh != NULL)
+    if ((signed int)file_info->fh >= 0)
       close(file_info->fh);
     return SUCCESS;
   }
@@ -1000,6 +1149,10 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     lseek(file_info->fh, 0, SEEK_SET);
     infile = open(data_fullpath, O_RDONLY);
     free(data_fullpath);
+    if (infile < 0) {
+      free(s3_key);
+      return -1;
+    }
     status = cloud_put_object(s3_bucket, s3_key, info.st_size, put_buffer);
     if (status != S3StatusOK) {
       #ifdef DEBUG
@@ -1013,7 +1166,7 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     close(infile);
     if (in_ssd) {
       meta_file = open(meta_fullpath, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-      if (meta_file == NULL) {
+      if (meta_file < 0) {
         return -errno;
       }
       if (write(meta_file, &(info.st_size), sizeof(off_t)) != sizeof(off_t)) {
@@ -1067,12 +1220,15 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
       data_fullpath = cloudfs_get_fullpath(path);
       file_info->fh = open(data_fullpath, O_RDWR);
       free(data_fullpath);
+      if ((signed int)file_info->fh < 0) {
+        return -1;
+      }
     }
     else {
       data_fullpath = cloudfs_get_data_fullpath(path);
       err = stat(data_fullpath, &temp);
       if (err && (errno == ENOENT)) {
-        if (file_info->fh != NULL) {
+        if ((signed int)file_info->fh >= 0) {
           close(file_info->fh);
         }
         free(data_fullpath);
@@ -1080,19 +1236,19 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
         free(reference_count);
         return SUCCESS;
       }
-      if (file_info->fh == NULL) {
+      if ((signed int)file_info->fh < 0) {
         file_info->fh = open(data_fullpath, O_RDWR);
-        if (file_info->fh == NULL) {
+        if ((signed int)file_info->fh < 0) {
           free(data_fullpath);
           return -errno;
         }
-        free(data_fullpath);
       }
+      free(data_fullpath);
     }
     if (dedup_migrate_file(path, file_info, in_ssd, 1)) {
       return -errno;
     }
-    if (file_info->fh != NULL) {
+    if ((signed int)file_info->fh >= 0) {
       close(file_info->fh);
     }
   }
