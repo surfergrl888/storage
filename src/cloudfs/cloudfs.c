@@ -692,7 +692,7 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
     if (!state_.no_dedup) {
       if ((signed int)file_info->fh < 0) {
         fullpath = cloudfs_get_fullpath(path);
-        data_file = open(fullpath, file_info->flags);
+        data_file = open(fullpath, O_RDONLY);
         free(fullpath);
         if (data_file < 0) {
           #ifdef LOGGING_ENABLED
@@ -724,7 +724,8 @@ int cloudfs_read(const char *path, char *buffer, size_t size,
         close(data_file);
         return -errno;
       }
-      close(data_file);
+      if (data_file != (signed int)file_info->fh)
+        close(data_file);
     }
     return retval;
   }
@@ -808,6 +809,9 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
   if (in_ssd) {
     free(meta_fullpath);
     if (!state_.no_dedup) {
+      if ((signed int)file_info->fh < 0) {
+        return -EBADF;
+      }
       err = lseek(file_info->fh, offset, SEEK_SET);
       if (err < 0) {
         #ifdef LOGGING_ENABLED
@@ -1043,8 +1047,10 @@ int cloudfs_open(const char *path, struct fuse_file_info *file_info)
   err = stat(meta_fullpath, &temp);
   if (err && (errno == ENOENT)) {
     free(meta_fullpath);
-    if (state_.no_dedup && ((file_info->flags & 3) == O_RDONLY))
+    if (state_.no_dedup && ((file_info->flags & 3) == O_RDONLY)) {
+      file_info->fh = -1;
       return SUCCESS;
+    }
     fullpath = cloudfs_get_fullpath(path);
     file_info->fh = open(fullpath, file_info->flags);
     free(fullpath);
@@ -1119,15 +1125,31 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
   log_write(log_string);
   #endif
   if (!state_.no_dedup && ((file_info->flags & 3) == O_RDONLY)) {
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "release exit 1\n");
+    log_write(log_string);
+    #endif
     return SUCCESS;
   }
-  fstat(file_info->fh, &info);
+  data_fullpath = cloudfs_get_fullpath(path);
+  stat(data_fullpath, &info);
+  free(data_fullpath);
+  HASH_FIND(hh, reference_counts,&(info.st_ino),sizeof(ino_t),reference_count);
   meta_fullpath = cloudfs_get_metadata_fullpath(path);
   err = stat(meta_fullpath, &temp);
   in_ssd = (err && (errno == ENOENT));
-  HASH_FIND(hh, reference_counts,&(info.st_ino),sizeof(ino_t),reference_count);
+  if ((signed int)file_info->fh >= 0)
+    fstat(file_info->fh, &info);
+  #ifdef LOGGING_ENABLED
+  sprintf(log_string, "basic file info: in_ssd=%d, ref_cnt=%d, size=%ld\n", in_ssd, reference_count->ref_count, (long)info.st_size);
+  log_write(log_string);
+  #endif
   if ((reference_count->ref_count > 1) || (in_ssd &&
                                            (info.st_size <= state_.threshold))) {
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "release exit 2\n");
+    log_write(log_string);
+    #endif
     reference_count->ref_count--;
     free(meta_fullpath);
     if ((signed int)file_info->fh >= 0)
@@ -1221,6 +1243,10 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
       file_info->fh = open(data_fullpath, O_RDWR);
       free(data_fullpath);
       if ((signed int)file_info->fh < 0) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "release failure 1: errno=%d\n", errno);
+        log_write(log_string);
+        #endif
         return -1;
       }
     }
@@ -1228,6 +1254,10 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
       data_fullpath = cloudfs_get_data_fullpath(path);
       err = stat(data_fullpath, &temp);
       if (err && (errno == ENOENT)) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "release exit 3\n");
+        log_write(log_string);
+        #endif
         if ((signed int)file_info->fh >= 0) {
           close(file_info->fh);
         }
@@ -1239,6 +1269,10 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
       if ((signed int)file_info->fh < 0) {
         file_info->fh = open(data_fullpath, O_RDWR);
         if ((signed int)file_info->fh < 0) {
+          #ifdef LOGGING_ENABLED
+          sprintf(log_string, "release failure 2: errno=%d\n", errno);
+          log_write(log_string);
+          #endif
           free(data_fullpath);
           return -errno;
         }
@@ -1250,6 +1284,11 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
     }
     if ((signed int)file_info->fh >= 0) {
       close(file_info->fh);
+    }
+    if (!in_ssd) {
+      data_fullpath = cloudfs_get_data_fullpath(path);
+      unlink(data_fullpath);
+      free(data_fullpath);
     }
   }
   HASH_DEL(reference_counts, reference_count);

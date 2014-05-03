@@ -1003,7 +1003,7 @@ int read_segment(char *hash, int bytes_to_read, char *buf,
         free(compress_temp_path);
         return -1;
       }
-      temp_file = fdopen(temp_fd, "r+");
+      temp_file = fdopen(temp_fd, "rb+");
       if (temp_file == NULL) {
         #ifdef LOGGING_ENABLED
         sprintf(log_string, "read_segment failure 4: errno=%d\n", errno);
@@ -1015,7 +1015,7 @@ int read_segment(char *hash, int bytes_to_read, char *buf,
         free(compress_temp_path);
         return -1;
       }
-      data_file = fopen(data_path, "w+");
+      data_file = fopen(data_path, "wb+");
       if (data_file == NULL) {
         #ifdef LOGGING_ENABLED
         sprintf(log_string, "read_segment failure 5: errno=%d\n", errno);
@@ -1030,7 +1030,7 @@ int read_segment(char *hash, int bytes_to_read, char *buf,
       err = inf(temp_file, data_file);
       if (err != Z_OK) {
         #ifdef LOGGING_ENABLED
-        sprintf(log_string, "read_segment failure 6: errno=%d\n", errno);
+        sprintf(log_string, "read_segment failure 6: errnum=%d, errno=%d\n",  err, errno);
         log_write(log_string);
         #endif
         fclose(data_file);
@@ -1050,12 +1050,20 @@ int read_segment(char *hash, int bytes_to_read, char *buf,
       data_fd = open(data_path, O_RDWR|O_CREAT,
                        S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
       if (data_fd < 0) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "read_segment failure 6.1: errno=%d\n", errno);
+        log_write(log_string);
+        #endif
         free(data_path);
         return -1;
       }
       outfile = data_fd;
       status = cloud_get_object(s3_bucket, hash+3, get_buffer);
       if (status != S3StatusOK) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "read_segment failure 6.2: status=%d\n", status);
+        log_write(log_string);
+        #endif
         #ifdef DEBUG
           cloud_print_error();
         #endif
@@ -1343,7 +1351,18 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
       free(compress_temp_path);
       return -1;
     }
-    temp = fdopen(temp_file, "r+");
+    err = lseek(temp_file, 0, SEEK_SET);
+    if (err < 0) {
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "get_last_segment failure 2.5: errno=%d\n", errno);
+      log_write(log_string);
+      #endif
+      close(temp_file);
+      unlink(compress_temp_path);
+      free(compress_temp_path);
+      return -1;
+    }
+    temp = fdopen(temp_file, "rb+");
     if (temp == NULL) {
       #ifdef LOGGING_ENABLED
       sprintf(log_string, "get_last_segment failure 3: errno=%d\n", errno);
@@ -1355,7 +1374,7 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
       return -1;
     }
     
-    data = fopen(data_target_path, "w+");
+    data = fopen(data_target_path, "wb+");
     if (data == NULL) {
       #ifdef LOGGING_ENABLED
       sprintf(log_string, "get_last_segment failure 4: errno=%d\n", errno);
@@ -1410,8 +1429,17 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
     }
     close(data_file);
   }
+  err = lseek(meta_file, 0, SEEK_SET);
+  if (err < 0) {
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "get_last_segment failure 7.5: errno=%d\n", errno);
+    log_write(log_string);
+    #endif
+    unlink(data_target_path);
+    return -1;
+  }
   fstat(meta_file, &info);
-  if (ftruncate(meta_file, info.st_size-MD5_DIGEST_LENGTH*2+1)) {
+  if (ftruncate(meta_file, info.st_size-(MD5_DIGEST_LENGTH*2+1))) {
     #ifdef LOGGING_ENABLED
     sprintf(log_string, "get_last_segment failure 8: errno=%d\n", errno);
     log_write(log_string);
@@ -1422,7 +1450,7 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
   HASH_FIND_STR(segment_hash_table, segment_hash, last_segment);
   if (last_segment == NULL) {
     #ifdef LOGGING_ENABLED
-    sprintf(log_string, "get_last_segment failure 9: errno=%d\n", errno);
+    sprintf(log_string, "get_last_segment failure 9: errno=%d, hash=%s\n", errno, segment_hash);
     log_write(log_string);
     #endif
     unlink(data_target_path);

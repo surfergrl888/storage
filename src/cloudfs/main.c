@@ -61,7 +61,7 @@ static void parse_arguments(int argc, char* argv[],
 
     state->no_cache = 0;
     state->cache_size = 32*1024*1024;
-    state->no_compress = 1;
+    state->no_compress = 0;
 
     // Parse args
     while (1) {
