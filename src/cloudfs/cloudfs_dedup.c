@@ -62,12 +62,10 @@
 #include "cloudfs_dedup.h"
 #include "dedup.h"
 
-#define DEDUP_VARIATION(x) (x/2)
 #define HASH_TABLE_FILE "/.hash_table"
 #define META_SEGMENT_LIST sizeof(off_t)+3*sizeof(time_t)
 #define COMPRESS_TEMP_FILE "/.temp_compress"
 #define SEGMENT_TEMP_FILE "/.segment_temp"
-#define SEGMENT_FILE_PREFIX "/.segment_"
 
 rabinpoly_t *rabin;
 int max_seg_size;
@@ -179,8 +177,8 @@ void dedup_init() {
   #ifdef LOGGING_ENABLED
   log_write("in dedup_init\n");
   #endif
-  max_seg_size = state_.avg_seg_size<<1;//+DEDUP_VARIATION(state_.avg_seg_size);
-  min_seg_size = state_.avg_seg_size>>1;//-DEDUP_VARIATION(state_.avg_seg_size);
+  max_seg_size = state_.avg_seg_size<<1;
+  min_seg_size = state_.avg_seg_size>>1;
   rabin = rabin_init(state_.rabin_window_size, state_.avg_seg_size,
                      min_seg_size, max_seg_size);
   if (!state_.no_cache) {
@@ -194,7 +192,7 @@ void dedup_destroy() {
   update_hash_table_file();
 }
 
-int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int in_ssd, char move_entire_file) {
+int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int in_ssd) {
   struct segment_hash_struct *current_segment;
   char s3_bucket[4];
 	unsigned char current_hash[MD5_DIGEST_LENGTH];
@@ -348,12 +346,6 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
         HASH_FIND_STR(segment_hash_table, current_hash_string, current_segment);
         total_segment_len += segment_len;
         
-        if( total_segment_len >= 0x4200) {
-          int mk=0;
-          mk=lseek(segmenting_fd, 0, SEEK_CUR);
-          mk = mk;
-          mk++;
-        }
         if (current_segment != NULL) {
           current_segment->ref_count ++;
           if (!state_.no_compress) {
@@ -548,7 +540,7 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
         #ifdef DEBUG
           printf("updating hash table...\n");
         #endif
-        update_hash_table_file();
+        //update_hash_table_file();
         #ifdef DEBUG
           printf("updating metadata...\n");
         #endif
@@ -613,311 +605,206 @@ int dedup_migrate_file(const char *path, struct fuse_file_info *file_info, int i
   #ifdef DEBUG
     printf("done segmenting, moving on to final segment...\n");
   #endif
-	if (move_entire_file) {
-	  for(i = 0; i < MD5_DIGEST_LENGTH; ++i)
-      sprintf(&current_hash_string[i*2], "%02x", (unsigned int)current_hash[i]);
-    current_segment = NULL;
-	  HASH_FIND_STR(segment_hash_table, current_hash_string, current_segment);
-    if (current_segment != NULL)
-      current_segment->ref_count ++;
-    else {
-      s3_bucket[0] = current_hash_string[0];
-      s3_bucket[1] = current_hash_string[1];
-      s3_bucket[2] = current_hash_string[2];
-      s3_bucket[3] = 0;
-      if (!bucket_exists(s3_bucket)) {
-        cloud_create_bucket(s3_bucket);
+	for(i = 0; i < MD5_DIGEST_LENGTH; ++i)
+    sprintf(&current_hash_string[i*2], "%02x", (unsigned int)current_hash[i]);
+  current_segment = NULL;
+	HASH_FIND_STR(segment_hash_table, current_hash_string, current_segment);
+  if (current_segment != NULL)
+    current_segment->ref_count ++;
+  else {
+    s3_bucket[0] = current_hash_string[0];
+    s3_bucket[1] = current_hash_string[1];
+    s3_bucket[2] = current_hash_string[2];
+    s3_bucket[3] = 0;
+    if (!bucket_exists(s3_bucket)) {
+      cloud_create_bucket(s3_bucket);
+    }
+    if (!state_.no_compress) {
+      #ifdef DEBUG
+        printf("compressing file...\n");
+      #endif
+      compress_temp_path = cloudfs_get_fullpath(COMPRESS_TEMP_FILE);
+      temp_fd = open(compress_temp_path, O_RDWR|O_CREAT,
+                     S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+      if (temp_fd < 0) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "migrate_file failure 19: errno=%d\n", errno);
+        log_write(log_string);
+        #endif
+        free(compress_temp_path);
+        close(meta_file);
+        if (state_.no_compress)
+		      close(segmenting_fd);
+        else
+	        fclose(segmenting_file);
+        if (in_ssd)
+          unlink(meta_fullpath);
+        free(meta_fullpath);
+        rabin_reset(rabin);
+        return -1;
       }
-      if (!state_.no_compress) {
-        #ifdef DEBUG
-          printf("compressing file...\n");
+      temp_file = fopen(compress_temp_path, "rb+");
+      if (temp_file == NULL) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "migrate_file failure 20: errno=%d\n", errno);
+        log_write(log_string);
         #endif
-        compress_temp_path = cloudfs_get_fullpath(COMPRESS_TEMP_FILE);
-        temp_fd = open(compress_temp_path, O_RDWR|O_CREAT,
-                         S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-        if (temp_fd < 0) {
-          #ifdef LOGGING_ENABLED
-          sprintf(log_string, "migrate_file failure 19: errno=%d\n", errno);
-          log_write(log_string);
-          #endif
-          free(compress_temp_path);
-          close(meta_file);
-          if (state_.no_compress)
-		        close(segmenting_fd);
-          else
-		        fclose(segmenting_file);
-          if (in_ssd)
-            unlink(meta_fullpath);
-          free(meta_fullpath);
-          rabin_reset(rabin);
-          return -1;
-        }
-        temp_file = fopen(compress_temp_path, "rb+");
-        if (temp_file == NULL) {
-          #ifdef LOGGING_ENABLED
-          sprintf(log_string, "migrate_file failure 20: errno=%d\n", errno);
-          log_write(log_string);
-          #endif
-          close(meta_file);
-          if (state_.no_compress)
-		        close(segmenting_fd);
-          else
-		        fclose(segmenting_file);
-          if (in_ssd)
-            unlink(meta_fullpath);
-          free(meta_fullpath);
-          close(temp_fd);
-          unlink(compress_temp_path);
-          free(compress_temp_path);
-          rabin_reset(rabin);
-          return -1;
-        }
-        err = def(segmenting_file, temp_file, segment_len,
-                  Z_DEFAULT_COMPRESSION);
-        if (err != Z_OK) {
-          #ifdef LOGGING_ENABLED
-          sprintf(log_string, "migrate_file failure 21: errno=%d\n", errno);
-          log_write(log_string);
-          #endif
-          close(meta_file);
-          if (state_.no_compress)
-		        close(segmenting_fd);
-	        else
-		        fclose(segmenting_file);
-          if (in_ssd)
-            unlink(meta_fullpath);
-          free(meta_fullpath);
-          fclose(temp_file);
-          close(temp_fd);
-          unlink(compress_temp_path);
-          free(compress_temp_path);
-          rabin_reset(rabin);
-          return -1;
-        }
-        fclose(temp_file);
-        stat(compress_temp_path, &info);
-        err = lseek(temp_fd, 0, SEEK_SET);
-        if (err < 0) {
-          #ifdef LOGGING_ENABLED
-          sprintf(log_string, "migrate_file failure 22: errno=%d\n", errno);
-          log_write(log_string);
-          #endif
-          close(meta_file);
-          if (state_.no_compress)
-		        close(segmenting_fd);
-	        else
-		        fclose(segmenting_file);
-          if (in_ssd)
-            unlink(meta_fullpath);
-          free(meta_fullpath);
-          close(temp_fd);
-          unlink(compress_temp_path);
-          free(compress_temp_path);
-          rabin_reset(rabin);
-          return -1;
-        }
-        infile = temp_fd;
-        #ifdef DEBUG
-          printf("moving segment...\n");
-        #endif
-        status = cloud_put_object(s3_bucket, current_hash_string+3, info.st_size, put_buffer);
-        if (status != S3StatusOK) {
-          #ifdef LOGGING_ENABLED
-          sprintf(log_string, "migrate_file failure 23: status=%d\n", status);
-          log_write(log_string);
-          #endif
-          #ifdef DEBUG
-            cloud_print_error();
-          #endif
-          close(meta_file);
-          if (state_.no_compress)
-		        close(segmenting_fd);
-		      else
-		        fclose(segmenting_file);
-          if (in_ssd)
-            unlink(meta_fullpath);
-          free(meta_fullpath);
-          close(temp_fd);
-          unlink(compress_temp_path);
-          free(compress_temp_path);
-          rabin_reset(rabin);
-          return -1;
-        }
+        close(meta_file);
+        if (state_.no_compress)
+		      close(segmenting_fd);
+        else
+		      fclose(segmenting_file);
+        if (in_ssd)
+          unlink(meta_fullpath);
+        free(meta_fullpath);
         close(temp_fd);
         unlink(compress_temp_path);
         free(compress_temp_path);
+        rabin_reset(rabin);
+        return -1;
       }
-      else {
-        #ifdef DEBUG
-          printf("moving segment...\n");
-        #endif
-        infile = segmenting_fd;
-        status = cloud_put_object(s3_bucket, current_hash_string+3, segment_len, put_buffer);
-        if (status != S3StatusOK) {
-          #ifdef LOGGING_ENABLED
-          sprintf(log_string, "migrate_file failure 24: status=%d\n", status);
-          log_write(log_string);
-          #endif
-          #ifdef DEBUG
-            cloud_print_error();
-          #endif
-          close(meta_file);
-          if (state_.no_compress)
-          close(segmenting_fd);
-		      else
-		        fclose(segmenting_file);
-          if (in_ssd)
-            unlink(meta_fullpath);
-          free(meta_fullpath);
-          rabin_reset(rabin);
-          return -1;
-        }
-      }
-      current_segment = malloc(sizeof(struct segment_hash_struct));
-      current_segment->length = segment_len;
-      memcpy(current_segment->hash, current_hash_string, MD5_DIGEST_LENGTH*2+1);
-      current_segment->ref_count = 1;
-      #ifdef LOGGING_ENABLED
-      sprintf(log_string, "adding %s to the hash table\n", current_segment->hash);
-      log_write(log_string);
-      #endif
-      HASH_ADD_STR(segment_hash_table, hash, current_segment);
-    }
-    #ifdef DEBUG
-      printf("updating hash table...\n");
-    #endif
-    update_hash_table_file();
-    #ifdef DEBUG
-      printf("updating metadata...\n");
-    #endif
-    if (write(meta_file, current_hash_string, MD5_DIGEST_LENGTH*2+1) != MD5_DIGEST_LENGTH*2+1) {
-      #ifdef LOGGING_ENABLED
-      sprintf(log_string, "migrate_file failure 25: errno=%d\n", errno);
-      log_write(log_string);
-      #endif
-      if (current_segment->ref_count == 1) {
+      err = def(segmenting_file, temp_file, segment_len,
+                Z_DEFAULT_COMPRESSION);
+      if (err != Z_OK) {
         #ifdef LOGGING_ENABLED
-        sprintf(log_string, "removing %s from the hash table\n", current_segment->hash);
+        sprintf(log_string, "migrate_file failure 21: errno=%d\n", errno);
         log_write(log_string);
         #endif
-        HASH_DEL(segment_hash_table, current_segment);
-        free(current_segment);
-      }
-      close(meta_file);
-      if (state_.no_compress)
-		    close(segmenting_fd);
-      else
-		    fclose(segmenting_file);
-      if (in_ssd)
-        unlink(meta_fullpath);
-      free(meta_fullpath);
-      rabin_reset(rabin);
-      return -1;
-    }
-	}
-	else {
-	  #ifdef DEBUG
-      printf("moving the rest of the data...\n");
-    #endif
-	  if (in_ssd) {
-	    data_fullpath = cloudfs_get_data_fullpath(path);
-	    close(file_info->fh);
-	    file_info->fh = open(data_fullpath, O_RDWR|O_CREAT,
-                           S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-      if ((signed int)file_info->fh < 0) {
-        free(data_fullpath);
-        if (state_.no_compress)
-		    close(segmenting_fd);
-        else
-		      fclose(segmenting_file);
-        free(meta_fullpath);
-        rabin_reset(rabin);
-        return -1;
-      }
-      if (sendfile(file_info->fh, segmenting_fd, NULL, segment_len) < 0) {
+        close(meta_file);
         if (state_.no_compress)
 		      close(segmenting_fd);
-        else
-		      fclose(segmenting_file);
+	      else
+	        fclose(segmenting_file);
+        if (in_ssd)
+          unlink(meta_fullpath);
         free(meta_fullpath);
-        close(file_info->fh);
-        unlink(data_fullpath);
-        free(data_fullpath);
-        rabin_reset(rabin);
-        return -1;
-      }
-      free(data_fullpath);
-		  free(meta_fullpath);
-	  }
-	  else {
-	    data_fullpath = cloudfs_get_data_fullpath(path);
-	    char *temp_path = cloudfs_get_fullpath(SEGMENT_TEMP_FILE);
-	    temp_fd = open(temp_path, O_RDWR|O_CREAT,
-                     S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-      if (temp_fd < 0) {
-        free(data_fullpath);
-        if (state_.no_compress)
-		    close(segmenting_fd);
-        else
-		      fclose(segmenting_file);
-		    unlink(data_fullpath);
-        free(meta_fullpath);
-        free(temp_path);
-        rabin_reset(rabin);
-        return -1;
-      }
-      if (sendfile(temp_fd, segmenting_fd, NULL, segment_len) < 0) {
-        if (state_.no_compress)
-		      close(segmenting_fd);
-        else
-		      fclose(segmenting_file);
-        free(meta_fullpath);
+        fclose(temp_file);
         close(temp_fd);
-        unlink(temp_path);
-        free(temp_path);
-        unlink(data_fullpath);
-        free(data_fullpath);
+        unlink(compress_temp_path);
+        free(compress_temp_path);
         rabin_reset(rabin);
         return -1;
       }
-      err = lseek(segmenting_fd, 0, SEEK_SET);
+      fclose(temp_file);
+      stat(compress_temp_path, &info);
+      err = lseek(temp_fd, 0, SEEK_SET);
       if (err < 0) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "migrate_file failure 22: errno=%d\n", errno);
+        log_write(log_string);
+        #endif
+        close(meta_file);
         if (state_.no_compress)
-		      close(segmenting_fd);
-        else
+	        close(segmenting_fd);
+	      else
 		      fclose(segmenting_file);
+        if (in_ssd)
+          unlink(meta_fullpath);
         free(meta_fullpath);
         close(temp_fd);
-        unlink(temp_path);
-        free(temp_path);
-        unlink(data_fullpath);
-        free(data_fullpath);
+        unlink(compress_temp_path);
+        free(compress_temp_path);
         rabin_reset(rabin);
         return -1;
       }
-      err = ftruncate(segmenting_fd, 0);
-      off_t start = 0;
-      if (sendfile(segmenting_fd, temp_fd, &(start), segment_len) < 0) {
+      infile = temp_fd;
+      #ifdef DEBUG
+        printf("moving segment...\n");
+      #endif
+      status = cloud_put_object(s3_bucket, current_hash_string+3, info.st_size, put_buffer);
+      if (status != S3StatusOK) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "migrate_file failure 23: status=%d\n", status);
+        log_write(log_string);
+        #endif
+        #ifdef DEBUG
+          cloud_print_error();
+        #endif
+        close(meta_file);
         if (state_.no_compress)
 		      close(segmenting_fd);
         else
 		      fclose(segmenting_file);
+        if (in_ssd)
+          unlink(meta_fullpath);
         free(meta_fullpath);
         close(temp_fd);
-        unlink(temp_path);
-        free(temp_path);
-        unlink(data_fullpath);
-        free(data_fullpath);
+        unlink(compress_temp_path);
+        free(compress_temp_path);
         rabin_reset(rabin);
         return -1;
       }
       close(temp_fd);
-      unlink(temp_path);
-      free(temp_path);
-      free(data_fullpath);
-      free(meta_fullpath);
-	  }
-	}
+      unlink(compress_temp_path);
+      free(compress_temp_path);
+    }
+    else {
+      #ifdef DEBUG
+        printf("moving segment...\n");
+      #endif
+      infile = segmenting_fd;
+      status = cloud_put_object(s3_bucket, current_hash_string+3, segment_len, put_buffer);
+      if (status != S3StatusOK) {
+        #ifdef LOGGING_ENABLED
+        sprintf(log_string, "migrate_file failure 24: status=%d\n", status);
+        log_write(log_string);
+        #endif
+        #ifdef DEBUG
+          cloud_print_error();
+        #endif
+        close(meta_file);
+        if (state_.no_compress)
+          close(segmenting_fd);
+	      else
+		      fclose(segmenting_file);
+        if (in_ssd)
+          unlink(meta_fullpath);
+        free(meta_fullpath);
+        rabin_reset(rabin);
+        return -1;
+      }
+    }
+    current_segment = malloc(sizeof(struct segment_hash_struct));
+    current_segment->length = segment_len;
+    memcpy(current_segment->hash, current_hash_string, MD5_DIGEST_LENGTH*2+1);
+    current_segment->ref_count = 1;
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "adding %s to the hash table\n", current_segment->hash);
+    log_write(log_string);
+    #endif
+    HASH_ADD_STR(segment_hash_table, hash, current_segment);
+  }
+  #ifdef DEBUG
+    printf("updating hash table...\n");
+  #endif
+  update_hash_table_file();
+  #ifdef DEBUG
+    printf("updating metadata...\n");
+  #endif
+  if (write(meta_file, current_hash_string, MD5_DIGEST_LENGTH*2+1) != MD5_DIGEST_LENGTH*2+1) {
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "migrate_file failure 25: errno=%d\n", errno);
+    log_write(log_string);
+    #endif
+    if (current_segment->ref_count == 1) {
+      #ifdef LOGGING_ENABLED
+      sprintf(log_string, "removing %s from the hash table\n", current_segment->hash);
+      log_write(log_string);
+      #endif
+      HASH_DEL(segment_hash_table, current_segment);
+      free(current_segment);
+    }
+    close(meta_file);
+    if (state_.no_compress)
+		  close(segmenting_fd);
+    else
+		  fclose(segmenting_file);
+    if (in_ssd)
+      unlink(meta_fullpath);
+    free(meta_fullpath);
+    rabin_reset(rabin);
+    return -1;
+  }
   close(meta_file);
   rabin_reset(rabin);
   if (state_.no_compress)
@@ -1335,6 +1222,14 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
     #endif
     return -1;
   }
+  HASH_FIND_STR(segment_hash_table, segment_hash, last_segment);
+  if (last_segment == NULL) {
+    #ifdef LOGGING_ENABLED
+    sprintf(log_string, "get_last_segment failure 9: errno=%d, hash=%s\n", errno, segment_hash);
+    log_write(log_string);
+    #endif
+    return -1;
+  }
   s3_bucket[0] = segment_hash[0];
   s3_bucket[1] = segment_hash[1];
   s3_bucket[2] = segment_hash[2];
@@ -1457,15 +1352,6 @@ int dedup_get_last_segment(const char *data_target_path, int meta_file) {
   if (ftruncate(meta_file, info.st_size-(MD5_DIGEST_LENGTH*2+1))) {
     #ifdef LOGGING_ENABLED
     sprintf(log_string, "get_last_segment failure 8: errno=%d\n", errno);
-    log_write(log_string);
-    #endif
-    unlink(data_target_path);
-    return -1;
-  }
-  HASH_FIND_STR(segment_hash_table, segment_hash, last_segment);
-  if (last_segment == NULL) {
-    #ifdef LOGGING_ENABLED
-    sprintf(log_string, "get_last_segment failure 9: errno=%d, hash=%s\n", errno, segment_hash);
     log_write(log_string);
     #endif
     unlink(data_target_path);

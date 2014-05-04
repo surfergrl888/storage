@@ -223,7 +223,7 @@ function execute_part3_tests()
 	done 
 	echo "workload.list file is in $TEMPDIR"
 	#ls -al /mnt/fuse/
-	sleep 20
+	sleep 5
 	./cloudfs_controller.sh x $CLOUDFSOPTS --cache-size $CACHESIZELIMIT	
 
 	collect_stats > $STATFILE.md5sum
@@ -435,7 +435,7 @@ function execute_part3_tests()
     done
 
     echo "run a rw mixed workload for benchmarking "
-    sleep 20
+    sleep 5
     ./cloudfs_controller.sh x $CLOUDFSOPTS --cache-size $CACHESIZELIMIT	
     collect_stats > $STATFILE.md5sum	
     input=$TEMPDIR/workload.list 

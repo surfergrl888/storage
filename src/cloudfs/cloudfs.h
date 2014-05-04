@@ -3,8 +3,12 @@
 
 #include "uthash.h"
 
+// Foreground debugging
 //#define DEBUG
+
+// Log debugging
 //#define LOGGING_ENABLED
+
 #define MAX_PATH_LEN 4096
 #define MAX_HOSTNAME_LEN 1024
 extern struct cloudfs_state state_;
@@ -26,6 +30,11 @@ struct cloudfs_state {
   char no_compress;
 };
 
+/* This struct is used to keep track of the open references to each file.
+ * Since open() can be called multiple times on the same file, we need to
+ * know how many times it's been called on each file so we don't move data
+ * to the cloud prematurely.
+ */
 struct reference_struct {
   ino_t inode;
   int ref_count;
@@ -38,7 +47,7 @@ int bucket_exists(char *bucket);
 void log_write(char *to_write);
 
 int cloudfs_start(struct cloudfs_state* state,
-                  const char* fuse_runtime_name);  
+                  const char* fuse_runtime_name); 
 char *cloudfs_get_fullpath(const char *path);
 char *cloudfs_get_metadata_fullpath(const char *path);
 char *cloudfs_get_data_fullpath(const char *path);

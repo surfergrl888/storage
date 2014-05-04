@@ -48,16 +48,19 @@
 
 #define UNUSED __attribute__((unused))
 #define SUCCESS 0
-// Autolab debugging version
-//#define LOGFILE "./cloudfs.log"
-// local debugging version
-#define LOGFILE "/home/guest/storage/src/scripts/cloudfs.log"
 #define META_TIMESTAMPS sizeof(off_t)
 #define UTIME_NOW	((1l << 30) - 1l)
 #define UTIME_OMIT	((1l << 30) - 2l)
 #define META_ATIME_OFFSET META_TIMESTAMPS
 #define META_MTIME_OFFSET META_TIMESTAMPS+sizeof(time_t)
 #define META_ATTRTIME_OFFSET META_MTIME_OFFSET+sizeof(time_t)
+
+#ifdef LOGGING_ENABLED
+// Autolab debugging version
+//#define LOGFILE "./cloudfs.log"
+// local debugging version
+#define LOGFILE "/home/guest/storage/src/scripts/cloudfs.log"
+#endif
 
 struct cloudfs_state state_;
 int infile, outfile;
@@ -831,18 +834,6 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
         #endif
         return -errno;
       }
-      
-      /*fstat(file_info->fh, &info);
-      if ((info.st_size > state_.threshold) &&
-          (info.st_size >= max_seg_size)) {
-        close(file_info->fh);
-        data_fullpath = cloudfs_get_fullpath(path);
-        file_info->fh = open(data_fullpath, O_RDWR);
-        free(data_fullpath);
-        if (dedup_migrate_file(path, file_info, in_ssd, 0))
-          return -errno;
-        
-      }*/
     }
     #ifdef LOGGING_ENABLED
     sprintf(log_string, "ssd write done: path=%s, bytes_written=%d\n", path, retval);
@@ -921,28 +912,6 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
       return -errno;
     }
     
-    fstat(file_info->fh, &info);
-    /*if (info.st_size >= max_seg_size) {
-      err = lseek(file_info->fh, 0, SEEK_SET);
-      if (err < 0) {
-        close(meta_file);
-        #ifdef LOGGING_ENABLED
-        sprintf(log_string, "write failure 10: path=%s, errno=%d\n", path,
-                errno);
-        log_write(log_string);
-        #endif
-        return -errno;
-      }
-      if (dedup_migrate_file(path, file_info, in_ssd, 0)) {
-        close(meta_file);
-        #ifdef LOGGING_ENABLED
-        sprintf(log_string, "write failure 11: path=%s, errno=%d\n", path,
-                errno);
-        log_write(log_string);
-        #endif
-        return -errno;
-      }
-    }*/
     err = lseek(meta_file, 0, SEEK_SET);
     if (err < 0) {
       close(meta_file);
@@ -969,7 +938,7 @@ int cloudfs_write(const char *path, const char *buffer, size_t size,
       #endif
       return -errno;
     }
-    new_size += size;
+    new_size += retval;
     if (write(meta_file, &new_size, sizeof(off_t)) != sizeof(off_t)) {
       close(meta_file);
       #ifdef LOGGING_ENABLED
@@ -1279,7 +1248,7 @@ int cloudfs_release(const char *path, struct fuse_file_info *file_info)
       }
       free(data_fullpath);
     }
-    if (dedup_migrate_file(path, file_info, in_ssd, 1)) {
+    if (dedup_migrate_file(path, file_info, in_ssd)) {
       return -errno;
     }
     if ((signed int)file_info->fh >= 0) {
